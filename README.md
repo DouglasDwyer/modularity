@@ -33,13 +33,13 @@ let mut resolver = Some(PackageResolver::new(package_ids), Linker::default());
 while let Some(r) = take(&mut resolver) {
     match r.resolve() {
         Ok(x) => {
-            // Create a transition to move the context to the new set of packages.
-            // The linking process can be customized here.
+            // Create a transition to move the context to the new set of packages
+            // The linking process can be customized here
             let transition = PackageContextTransitionBuilder::new(&x, &ctx)
                 .build(&mut store, &ctx)
                 .unwrap();
 
-            // Apply the transition to the package context.
+            // Apply the transition to the package context
             transition.apply(&mut store, &mut ctx);
 
             println!("Loaded packages are {:?}", ctx.packages().collect::<Vec<_>>());
@@ -51,7 +51,10 @@ while let Some(r) = take(&mut resolver) {
             }
             resolver = Some(r);
         }
-        x => panic!("{x:?}"),
+        x => panic!("Error occurred: {x:?}"),
     }
 }
 ```
+
+`modularity` relies on the `wasm_component_layer` crate for creating loaded WASM modules. It is the
+responsibility of the consumer to supply parsed `wasm_component_layer::Component` instances from a source.
