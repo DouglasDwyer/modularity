@@ -1,0 +1,11 @@
+package test:guest3
+
+interface baz {
+    // Selects the item in position n within list x
+    select-nth: func(x: list<string>, n: u32) -> string
+}
+
+world guest {
+    import test:guest2/bar
+    export baz
+}
