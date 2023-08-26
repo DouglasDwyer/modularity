@@ -5,8 +5,8 @@
 
 //! Crate docs
 
-use anyhow::*;
 use anyhow::Error;
+use anyhow::*;
 use bitvec::access::*;
 use bitvec::prelude::*;
 use fxhash::*;
@@ -14,8 +14,8 @@ use semver::*;
 use std::borrow::*;
 use std::mem::*;
 use std::ops::*;
-use std::sync::*;
 use std::sync::atomic::*;
+use std::sync::*;
 use topo_sort::*;
 use wasm_component_layer::*;
 
@@ -24,14 +24,14 @@ use wasm_component_layer::*;
 #[derive(PartialEq, Eq)]
 struct PartialVersionRef<'a>(Option<&'a Version>);
 
-impl<'a> PartialVersionRef<'a> {    
+impl<'a> PartialVersionRef<'a> {
     /// Determines whether the `semver` equation `other = ^self` is satisfied.
     pub fn matches(&self, other: &Self) -> bool {
         match (&self.0, &other.0) {
             (None, None) => true,
             (Some(_), None) => false,
             (None, Some(_)) => true,
-            (Some(a), Some(b)) => a.major == b.major && a.minor == b.minor && a.patch <= b.patch
+            (Some(a), Some(b)) => a.major == b.major && a.minor == b.minor && a.patch <= b.patch,
         }
     }
 }
@@ -42,7 +42,7 @@ impl<'a> PartialOrd for PartialVersionRef<'a> {
             (None, None) => std::cmp::Ordering::Equal,
             (Some(_), None) => std::cmp::Ordering::Greater,
             (None, Some(_)) => std::cmp::Ordering::Less,
-            (Some(a), Some(b)) => a.cmp(b)
+            (Some(a), Some(b)) => a.cmp(b),
         })
     }
 }
@@ -53,7 +53,7 @@ impl<'a> Ord for PartialVersionRef<'a> {
             (None, None) => std::cmp::Ordering::Equal,
             (Some(_), None) => std::cmp::Ordering::Greater,
             (None, Some(_)) => std::cmp::Ordering::Less,
-            (Some(a), Some(b)) => a.cmp(b)
+            (Some(a), Some(b)) => a.cmp(b),
         }
     }
 }
@@ -64,7 +64,7 @@ struct ResolvedPackage {
     /// The ID of the package.
     pub id: PackageIdentifier,
     /// The parsed component.
-    pub component: Component
+    pub component: Component,
 }
 
 /// Stores transient information about a package during version resolution.
@@ -75,7 +75,7 @@ struct PackageResolutionInfo {
     /// Whether any candidate packages must match in version exactly.
     pub exact: bool,
     /// Whether this package is resolved and in the component graph.
-    pub state: PackageResolutionState
+    pub state: PackageResolutionState,
 }
 
 /// Denotes a package's current standing in the component graph.
@@ -98,7 +98,7 @@ pub struct UnresolvedPackage {
     /// The ID of the package.
     id: PackageIdentifier,
     /// The selected component, if any.
-    selected: Option<(PackageIdentifier, Component)>
+    selected: Option<(PackageIdentifier, Component)>,
 }
 
 impl UnresolvedPackage {
@@ -122,15 +122,32 @@ impl UnresolvedPackage {
     /// Resolves this package using the given component and ID. The resolved component must match in name and
     /// have a compatible version, otherwise, a panic will occur.
     pub fn resolve(&mut self, id: PackageIdentifier, component: Component) {
-        assert!(self.id.name() == id.name(), "Package names were not the same.");
+        assert!(
+            self.id.name() == id.name(),
+            "Package names were not the same."
+        );
         if self.exact {
-            assert!(self.id.version() == id.version(), "Package {} versions did not match exactly: expected {:?} but got {:?}", self.id.name(), self.id.version(), id.version());
-        }
-        else {
-            assert!(PartialVersionRef(self.id.version()).matches(&PartialVersionRef(id.version())), "Package {} versions did not match: expected {:?} but got {:?}", self.id.name(), self.id.version(), id.version());
+            assert!(
+                self.id.version() == id.version(),
+                "Package {} versions did not match exactly: expected {:?} but got {:?}",
+                self.id.name(),
+                self.id.version(),
+                id.version()
+            );
+        } else {
+            assert!(
+                PartialVersionRef(self.id.version()).matches(&PartialVersionRef(id.version())),
+                "Package {} versions did not match: expected {:?} but got {:?}",
+                self.id.name(),
+                self.id.version(),
+                id.version()
+            );
         }
 
-        assert!(replace(&mut self.selected, Some((id, component))).is_none(), "Package was already resolved.");
+        assert!(
+            replace(&mut self.selected, Some((id, component))).is_none(),
+            "Package was already resolved."
+        );
     }
 }
 
@@ -148,7 +165,7 @@ pub struct PackageResolver {
     /// The set of packages that are currently undergoing resolution.
     to_resolve: Vec<PackageIdentifier>,
     /// The linker that will be used to resolve host imports.
-    linker: Linker
+    linker: Linker,
 }
 
 impl PackageResolver {
@@ -158,7 +175,12 @@ impl PackageResolver {
         let mut top_level_packages = FxHashMap::default();
 
         for id in ids {
-            assert!(top_level_packages.insert(id.name().clone(), id.version().cloned()).is_none(), "Duplicate top-level packages.");            
+            assert!(
+                top_level_packages
+                    .insert(id.name().clone(), id.version().cloned())
+                    .is_none(),
+                "Duplicate top-level packages."
+            );
         }
 
         let mut to_resolve = Vec::with_capacity(top_level_packages.len());
@@ -168,11 +190,14 @@ impl PackageResolver {
 
         Self {
             graph: TopoSort::new(),
-            chosen_packages: FxHashMap::with_capacity_and_hasher(top_level_packages.len(), FxBuildHasher::default()),
+            chosen_packages: FxHashMap::with_capacity_and_hasher(
+                top_level_packages.len(),
+                FxBuildHasher::default(),
+            ),
             top_level_packages,
             unresolved_packages: Vec::with_capacity(to_resolve.len()),
             to_resolve,
-            linker
+            linker,
         }
     }
 
@@ -192,37 +217,54 @@ impl PackageResolver {
                     match info.state {
                         PackageResolutionState::Unresolved(idx) => {
                             self.unresolved_packages[idx as usize].id = next;
-                        },
+                        }
                         PackageResolutionState::Resolved(_) => {
                             let index = self.unresolved_packages.len() as u16;
                             info.state = PackageResolutionState::Unresolved(index);
-                            self.unresolved_packages.push(UnresolvedPackage { exact: self.top_level_packages.contains_key(next.name()), id: next, selected: None });
-                        },
+                            self.unresolved_packages.push(UnresolvedPackage {
+                                exact: self.top_level_packages.contains_key(next.name()),
+                                id: next,
+                                selected: None,
+                            });
+                        }
                         PackageResolutionState::InGraph(_) => {
                             self.reset_graph();
-                        },
+                        }
                     }
-                }
-                else if let PackageResolutionState::Resolved(x) = &mut info.state {
-                    self.graph.insert(next.name().clone(), x.imports().instances().filter_map(|(x, _)| self.linker.instance(x).is_none().then(|| {
-                        self.to_resolve.push(x.package().clone());
-                        x.package().name().clone()
-                    })));
+                } else if let PackageResolutionState::Resolved(x) = &mut info.state {
+                    self.graph.insert(
+                        next.name().clone(),
+                        x.imports().instances().filter_map(|(x, _)| {
+                            self.linker.instance(x).is_none().then(|| {
+                                self.to_resolve.push(x.package().clone());
+                                x.package().name().clone()
+                            })
+                        }),
+                    );
 
                     info.state = PackageResolutionState::InGraph(x.clone());
-                }                
-            }
-            else {
+                }
+            } else {
                 let index = self.unresolved_packages.len() as u16;
-                self.chosen_packages.insert(next.name().clone(), PackageResolutionInfo { version: next.version().cloned(), exact: self.top_level_packages.contains_key(next.name()), state: PackageResolutionState::Unresolved(index) });
-                self.unresolved_packages.push(UnresolvedPackage { exact: self.top_level_packages.contains_key(next.name()), id: next, selected: None });
+                self.chosen_packages.insert(
+                    next.name().clone(),
+                    PackageResolutionInfo {
+                        version: next.version().cloned(),
+                        exact: self.top_level_packages.contains_key(next.name()),
+                        state: PackageResolutionState::Unresolved(index),
+                    },
+                );
+                self.unresolved_packages.push(UnresolvedPackage {
+                    exact: self.top_level_packages.contains_key(next.name()),
+                    id: next,
+                    selected: None,
+                });
             }
         }
 
         if self.unresolved_packages.is_empty() {
             self.into_package_topology()
-        }
-        else {
+        } else {
             std::result::Result::Err(PackageResolverError::MissingPackages(self))
         }
     }
@@ -233,8 +275,12 @@ impl PackageResolver {
         self.graph = TopoSort::new();
         self.unresolved_packages.clear();
         self.to_resolve.clear();
-        self.to_resolve.extend(self.top_level_packages.iter().map(|(a, b)| PackageIdentifier::new(a.clone(), b.clone())));
-    
+        self.to_resolve.extend(
+            self.top_level_packages
+                .iter()
+                .map(|(a, b)| PackageIdentifier::new(a.clone(), b.clone())),
+        );
+
         for pkg in self.chosen_packages.values_mut() {
             if let PackageResolutionState::InGraph(x) = &mut pkg.state {
                 pkg.state = PackageResolutionState::Resolved(x.clone());
@@ -249,8 +295,11 @@ impl PackageResolver {
             transitive_dependencies: PackageFlagsList::new(false, self.graph.len()),
             transitive_dependents: PackageFlagsList::new(false, self.graph.len()),
             top_level_packages: BitVec::repeat(false, self.graph.len()),
-            package_map: FxHashMap::with_capacity_and_hasher(self.graph.len(), FxBuildHasher::default()),
-            linker: Linker::default()
+            package_map: FxHashMap::with_capacity_and_hasher(
+                self.graph.len(),
+                FxBuildHasher::default(),
+            ),
+            linker: Linker::default(),
         };
 
         self.load_packages_and_dependencies(&mut res)?;
@@ -261,28 +310,33 @@ impl PackageResolver {
     }
 
     /// Loads a package's component and its transitive dependency list into the output image.
-    fn load_packages_and_dependencies(&mut self, res: &mut PackageContextImageInner) -> Result<(), PackageResolverError> {
+    fn load_packages_and_dependencies(
+        &mut self,
+        res: &mut PackageContextImageInner,
+    ) -> Result<(), PackageResolverError> {
         for x in self.graph.nodes() {
             let name = x.map_err(|_| PackageResolverError::CyclicPackageDependency())?;
             let chosen = &self.chosen_packages[name];
 
             if let PackageResolutionState::InGraph(x) = &chosen.state {
                 let idx = res.packages.len();
-                
+
                 if chosen.exact {
                     res.top_level_packages.set(idx, true);
                 }
 
                 res.package_map.insert(name.clone(), idx as u16);
-                res.packages.push(ResolvedPackage { id: PackageIdentifier::new(name.clone(), chosen.version.clone()), component: x.clone() });
-        
+                res.packages.push(ResolvedPackage {
+                    id: PackageIdentifier::new(name.clone(), chosen.version.clone()),
+                    component: x.clone(),
+                });
+
                 let mut edit = res.transitive_dependencies.edit(idx);
                 edit.set(idx, true);
                 for dependency in &self.graph[name] {
                     edit.or_with(res.package_map[dependency] as usize);
                 }
-            }
-            else {
+            } else {
                 unreachable!();
             }
         }
@@ -307,14 +361,19 @@ impl PackageResolver {
         let mut i = 0;
         self.unresolved_packages.retain(|resolved| {
             if let Some((id, pkg)) = &resolved.selected {
-                let info = self.chosen_packages.get_mut(id.name()).expect("Package was not in map.");
+                let info = self
+                    .chosen_packages
+                    .get_mut(id.name())
+                    .expect("Package was not in map.");
                 info.version = id.version().cloned();
                 info.state = PackageResolutionState::Resolved(pkg.clone());
                 self.to_resolve.push(id.clone());
                 false
-            }
-            else {
-                self.chosen_packages.get_mut(resolved.id.name()).expect("Package was not in map.").state = PackageResolutionState::Unresolved(i);
+            } else {
+                self.chosen_packages
+                    .get_mut(resolved.id.name())
+                    .expect("Package was not in map.")
+                    .state = PackageResolutionState::Unresolved(i);
                 i += 1;
                 true
             }
@@ -323,32 +382,51 @@ impl PackageResolver {
 
     /// Takes the maximum between two dependency versions, returning whether the version
     /// changed in the process.
-    fn upgrade(id: &PackageIdentifier, mut current: &mut Option<Version>, exact: bool) -> Result<bool, PackageResolverError> {
+    fn upgrade(
+        id: &PackageIdentifier,
+        mut current: &mut Option<Version>,
+        exact: bool,
+    ) -> Result<bool, PackageResolverError> {
         if exact {
             if id.version() == current.as_ref() {
                 std::result::Result::Ok(false)
+            } else {
+                std::result::Result::Err(PackageResolverError::IncompatibleVersions(
+                    id.name().clone(),
+                    current.clone(),
+                    id.version().cloned(),
+                ))
             }
-            else {
-                std::result::Result::Err(PackageResolverError::IncompatibleVersions(id.name().clone(), current.clone(), id.version().cloned()))
-            }
-        }
-        else {
+        } else {
             match (&mut current, id.version()) {
                 (None, None) => std::result::Result::Ok(false),
-                (None, Some(x)) => { *current = Some(x.clone()); std::result::Result::Ok(true) },
+                (None, Some(x)) => {
+                    *current = Some(x.clone());
+                    std::result::Result::Ok(true)
+                }
                 (Some(_), None) => std::result::Result::Ok(false),
-                (Some(a), Some(b)) => if a.major == b.major && a.minor == b.minor {
-                    if a.patch < b.patch {
-                        a.patch = b.patch;
-                        std::result::Result::Ok(true)
+                (Some(a), Some(b)) => {
+                    if a.major == b.major && a.minor == b.minor {
+                        if a.patch < b.patch {
+                            a.patch = b.patch;
+                            std::result::Result::Ok(true)
+                        } else if a.patch == b.patch && a.pre != b.pre {
+                            std::result::Result::Err(PackageResolverError::IncompatibleVersions(
+                                id.name().clone(),
+                                Some(a.clone()),
+                                Some(b.clone()),
+                            ))
+                        } else {
+                            std::result::Result::Ok(false)
+                        }
+                    } else {
+                        std::result::Result::Err(PackageResolverError::IncompatibleVersions(
+                            id.name().clone(),
+                            Some(a.clone()),
+                            Some(b.clone()),
+                        ))
                     }
-                    else if a.patch == b.patch && a.pre != b.pre {
-                        std::result::Result::Err(PackageResolverError::IncompatibleVersions(id.name().clone(), Some(a.clone()), Some(b.clone())))
-                    }
-                    else {
-                        std::result::Result::Ok(false)
-                    }
-                } else { std::result::Result::Err(PackageResolverError::IncompatibleVersions(id.name().clone(), Some(a.clone()), Some(b.clone()))) },
+                }
             }
         }
     }
@@ -369,7 +447,7 @@ pub enum PackageResolverError {
     /// `semver` versions.
     IncompatibleVersions(PackageName, Option<Version>, Option<Version>),
     /// The resolver needs additional packages to be supplied externally.
-    MissingPackages(PackageResolver)
+    MissingPackages(PackageResolver),
 }
 
 /// Describes a target state which can be applied to a [`PackageContext`]. Each
@@ -385,7 +463,7 @@ impl PackageContextImage {
             state: ctx.state,
             image: self,
             to_load: Vec::with_capacity(self.0.packages.len()),
-            to_unload: Vec::with_capacity(ctx.packages.len())
+            to_unload: Vec::with_capacity(ctx.packages.len()),
         };
 
         let mut old_touched_dead = BitVec::<usize, Lsb0>::repeat(false, 2 * ctx.packages.len());
@@ -399,20 +477,28 @@ impl PackageContextImage {
                 }
 
                 if old_dead[*old_i as usize] {
-                    transition.to_unload.push(ctx.image.0.packages[*old_i as usize].id.clone());
-                    transition.to_load.push(PackageBuildOptions { resolved: pkg, linker: Cow::Borrowed(&self.0.linker) });
-                }
-                else {
+                    transition
+                        .to_unload
+                        .push(ctx.image.0.packages[*old_i as usize].id.clone());
+                    transition.to_load.push(PackageBuildOptions {
+                        resolved: pkg,
+                        linker: Cow::Borrowed(&self.0.linker),
+                    });
+                } else {
                     old_touched.set(*old_i as usize, true);
                 }
-            }
-            else {
-                transition.to_load.push(PackageBuildOptions { resolved: pkg, linker: Cow::Borrowed(&self.0.linker) });
+            } else {
+                transition.to_load.push(PackageBuildOptions {
+                    resolved: pkg,
+                    linker: Cow::Borrowed(&self.0.linker),
+                });
             }
         }
 
         for i in old_touched.iter_zeros() {
-            transition.to_unload.push(ctx.image.0.packages[i].id.clone());
+            transition
+                .to_unload
+                .push(ctx.image.0.packages[i].id.clone());
         }
 
         transition.to_unload.reverse();
@@ -421,36 +507,54 @@ impl PackageContextImage {
     }
 
     /// Obtains an iterator over all packages that this one depends upon, directly or indirectly.
-    pub fn transitive_dependencies<'a>(&'a self, id: &PackageIdentifier) -> impl 'a + Iterator<Item = &'a PackageIdentifier> {
-        self.0.package_map.get(id.name()).and_then(|x| (&self.0.packages[*x as usize].id == id).then_some(x)).into_iter()
+    pub fn transitive_dependencies<'a>(
+        &'a self,
+        id: &PackageIdentifier,
+    ) -> impl 'a + Iterator<Item = &'a PackageIdentifier> {
+        self.0
+            .package_map
+            .get(id.name())
+            .and_then(|x| (&self.0.packages[*x as usize].id == id).then_some(x))
+            .into_iter()
             .flat_map(|x| self.0.transitive_dependencies.get(*x as usize).iter_ones())
             .map(|x| &self.0.packages[x].id)
     }
 
     /// Obtains an iterator over all packages that depend upon this one, directly or indirectly.
-    pub fn transitive_dependents<'a>(&'a self, id: &PackageIdentifier) -> impl 'a + Iterator<Item = &'a PackageIdentifier> {
-        self.0.package_map.get(id.name()).and_then(|x| (&self.0.packages[*x as usize].id == id).then_some(x)).into_iter()
+    pub fn transitive_dependents<'a>(
+        &'a self,
+        id: &PackageIdentifier,
+    ) -> impl 'a + Iterator<Item = &'a PackageIdentifier> {
+        self.0
+            .package_map
+            .get(id.name())
+            .and_then(|x| (&self.0.packages[*x as usize].id == id).then_some(x))
+            .into_iter()
             .flat_map(|x| self.0.transitive_dependents.get(*x as usize).iter_ones())
             .map(|x| &self.0.packages[x].id)
     }
 
     /// Obtains an iterator over all top-level packages that depend upon this one, directly or indirectly.
-    pub fn top_level_dependents<'a>(&'a self, id: &PackageIdentifier) -> impl 'a + Iterator<Item = &'a PackageIdentifier> {
+    pub fn top_level_dependents<'a>(
+        &'a self,
+        id: &PackageIdentifier,
+    ) -> impl 'a + Iterator<Item = &'a PackageIdentifier> {
         let mut tmp = self.0.top_level_packages.clone();
-        
+
         if let Some(pkg) = self.0.package_map.get(id.name()) {
             if &self.0.packages[*pkg as usize].id == id {
                 tmp[..] &= self.0.transitive_dependents.get(*pkg as usize);
-            }
-            else {
+            } else {
                 tmp.fill(false);
             }
-        }
-        else {
+        } else {
             tmp.fill(false);
         }
 
-        tmp.iter_ones().collect::<Vec<_>>().into_iter().map(|x| &self.0.packages[x].id)
+        tmp.iter_ones()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|x| &self.0.packages[x].id)
     }
 }
 
@@ -468,7 +572,7 @@ struct PackageContextImageInner {
     /// A mapping from package name to index in the resolved list.
     pub package_map: FxHashMap<PackageName, u16>,
     /// The host linker.
-    pub linker: Linker
+    pub linker: Linker,
 }
 
 /// Facilitates the creation of new [`PackageContextTransition`]s, which switch the [`PackageContextImage`]
@@ -508,7 +612,11 @@ impl<'a> PackageContextTransitionBuilder<'a> {
     }
 
     /// Instantiates and links any new components to produce a final [`PackageContextTransition`].
-    pub fn build(self, store: impl AsContextMut, ctx: &PackageContext) -> Result<PackageContextTransition> {
+    pub fn build(
+        self,
+        store: impl AsContextMut,
+        ctx: &PackageContext,
+    ) -> Result<PackageContextTransition> {
         ctx.create_next_state(store, self)
     }
 }
@@ -525,12 +633,16 @@ pub struct PackageContextTransition {
     /// The list of packages to unload.
     to_unload: Vec<PackageIdentifier>,
     /// The new set of packages for the context.
-    packages: FxHashMap<PackageName, ResolvedInstance>
+    packages: FxHashMap<PackageName, ResolvedInstance>,
 }
 
 impl PackageContextTransition {
     /// Applies this transition to the given context, updating the set of loaded packages.
-    pub fn apply<T, E: wasm_runtime_layer::backend::WasmEngine>(self, store: &mut Store<T, E>, ctx: &mut PackageContext) -> Vec<Error> {
+    pub fn apply<T, E: wasm_runtime_layer::backend::WasmEngine>(
+        self,
+        store: &mut Store<T, E>,
+        ctx: &mut PackageContext,
+    ) -> Vec<Error> {
         ctx.apply(store, self)
     }
 
@@ -555,7 +667,7 @@ pub struct PackageBuildOptions<'a> {
     /// The resolved package.
     resolved: &'a ResolvedPackage,
     /// The linker to use.
-    linker: Cow<'a, Linker>
+    linker: Cow<'a, Linker>,
 }
 
 impl<'a> PackageBuildOptions<'a> {
@@ -672,7 +784,7 @@ struct ResolvedInstance {
     /// The version of the instance.
     version: Option<Version>,
     /// The instantiated component.
-    instance: Instance
+    instance: Instance,
 }
 
 /// Represents an instantiated WebAssembly component that is owned by a [`PackageContext`].
@@ -681,7 +793,7 @@ pub struct LoadedPackage<'a> {
     /// The package's ID.
     name: PackageIdentifier,
     /// The instance associated with the package.
-    instance: &'a Instance
+    instance: &'a Instance,
 }
 
 impl<'a> LoadedPackage<'a> {
@@ -705,13 +817,17 @@ pub struct PackageContext {
     /// The context's image.
     image: PackageContextImage,
     /// The set of currently-loaded packages.
-    packages: FxHashMap<PackageName, ResolvedInstance>
+    packages: FxHashMap<PackageName, ResolvedInstance>,
 }
 
 impl PackageContext {
     /// Creates a new package context with nothing loaded.
     pub fn new() -> Self {
-        Self { state: Self::next_state(), image: PackageContextImage::default(), packages: FxHashMap::default() }
+        Self {
+            state: Self::next_state(),
+            image: PackageContextImage::default(),
+            packages: FxHashMap::default(),
+        }
     }
 
     /// The image upon which this context is based.
@@ -721,24 +837,40 @@ impl PackageContext {
 
     /// Gets the package with the provided name, if any.
     pub fn package(&self, name: &PackageName) -> Option<LoadedPackage> {
-        self.packages.get(name).map(|x| LoadedPackage { name: PackageIdentifier::new(name.clone(), x.version.clone()), instance: &x.instance })
+        self.packages.get(name).map(|x| LoadedPackage {
+            name: PackageIdentifier::new(name.clone(), x.version.clone()),
+            instance: &x.instance,
+        })
     }
 
     /// Gets an iterator over all loaded packages.
     pub fn packages(&self) -> impl '_ + Iterator<Item = LoadedPackage> {
-        self.packages.iter().map(|(name, x)| LoadedPackage { name: PackageIdentifier::new(name.clone(), x.version.clone()), instance: &x.instance })
+        self.packages.iter().map(|(name, x)| LoadedPackage {
+            name: PackageIdentifier::new(name.clone(), x.version.clone()),
+            instance: &x.instance,
+        })
     }
 
     /// Applies a state transition to this context.
-    fn apply<T, E: wasm_runtime_layer::backend::WasmEngine>(&mut self, ctx: &mut Store<T, E>, transition: PackageContextTransition) -> Vec<Error> {
-        assert!(self.state == transition.state, "Transition was not created for the current context's state.");
+    fn apply<T, E: wasm_runtime_layer::backend::WasmEngine>(
+        &mut self,
+        ctx: &mut Store<T, E>,
+        transition: PackageContextTransition,
+    ) -> Vec<Error> {
+        assert!(
+            self.state == transition.state,
+            "Transition was not created for the current context's state."
+        );
         let mut errors = Vec::new();
-        
+
         for to_unload in &transition.to_unload {
-            let inst = self.packages.remove(to_unload.name()).expect("Could not find instance.");
+            let inst = self
+                .packages
+                .remove(to_unload.name())
+                .expect("Could not find instance.");
             errors.extend(inst.instance.drop(ctx).expect("Could not drop instance."));
         }
-        
+
         self.state = Self::next_state();
         self.packages = transition.packages;
         self.image = transition.image;
@@ -747,46 +879,89 @@ impl PackageContext {
     }
 
     /// Creates a context transition from a builder.
-    fn create_next_state(&self, mut ctx: impl AsContextMut, mut transition: PackageContextTransitionBuilder) -> Result<PackageContextTransition> {
-        assert!(self.state == transition.state, "Transition was not created for the current context's state.");
+    fn create_next_state(
+        &self,
+        mut ctx: impl AsContextMut,
+        mut transition: PackageContextTransitionBuilder,
+    ) -> Result<PackageContextTransition> {
+        assert!(
+            self.state == transition.state,
+            "Transition was not created for the current context's state."
+        );
         let mut next_packages = self.packages.clone();
 
         for to_unload in &transition.to_unload {
-            assert!(next_packages.remove(to_unload.name()).is_some(), "Did not find package to remove");
+            assert!(
+                next_packages.remove(to_unload.name()).is_some(),
+                "Did not find package to remove"
+            );
         }
 
         let mut to_load = Vec::with_capacity(transition.to_load.len());
-        
+
         for step in &mut transition.to_load {
             to_load.push(step.resolved.id.clone());
             Self::load_new(&mut next_packages, ctx.as_context_mut(), step)?;
         }
 
-        Ok(PackageContextTransition { state: self.state, image: transition.image.clone(), to_load, to_unload: transition.to_unload, packages: next_packages })
+        Ok(PackageContextTransition {
+            state: self.state,
+            image: transition.image.clone(),
+            to_load,
+            to_unload: transition.to_unload,
+            packages: next_packages,
+        })
     }
 
     /// Instantiates a new package, linking all of its imports in the process.
-    fn load_new(packages: &mut FxHashMap<PackageName, ResolvedInstance>, ctx: impl AsContextMut, step: &mut PackageBuildOptions) -> Result<()> {
+    fn load_new(
+        packages: &mut FxHashMap<PackageName, ResolvedInstance>,
+        ctx: impl AsContextMut,
+        step: &mut PackageBuildOptions,
+    ) -> Result<()> {
         let linker = step.linker.to_mut();
 
         for (interface, _) in step.resolved.component.imports().instances() {
             let exporting_package = &packages[interface.package().name()];
-            let name = InterfaceIdentifier::new(PackageIdentifier::new(interface.package().name().clone(), exporting_package.version.clone()), interface.name());
+            let name = InterfaceIdentifier::new(
+                PackageIdentifier::new(
+                    interface.package().name().clone(),
+                    exporting_package.version.clone(),
+                ),
+                interface.name(),
+            );
             if let Some(exported) = exporting_package.instance.exports().instance(&name) {
                 Self::fill_linker(linker, interface, exported)?;
-            }
-            else {
-                bail!("Package {} required missing interface {interface}", step.resolved.id);
+            } else {
+                bail!(
+                    "Package {} required missing interface {interface}",
+                    step.resolved.id
+                );
             }
         }
 
-        assert!(packages.insert(step.resolved.id.name().clone(), ResolvedInstance { version: step.resolved.id.version().cloned(), instance: linker.instantiate(ctx, &step.resolved.component)? }).is_none(), "Added duplicate packages.");
+        assert!(
+            packages
+                .insert(
+                    step.resolved.id.name().clone(),
+                    ResolvedInstance {
+                        version: step.resolved.id.version().cloned(),
+                        instance: linker.instantiate(ctx, &step.resolved.component)?
+                    }
+                )
+                .is_none(),
+            "Added duplicate packages."
+        );
         Ok(())
     }
 
     /// Adds all exports from the provided interface instantiation to the linker, failing if any
     /// externals are already defined.
-    fn fill_linker(linker: &mut Linker, id: &InterfaceIdentifier, instance: &ExportInstance) -> Result<()> {
+    fn fill_linker(
+        linker: &mut Linker,
+        id: &InterfaceIdentifier,
+        instance: &ExportInstance,
+    ) -> Result<()> {
         let to_fill = linker.define_instance(id.clone())?;
 
         for (name, func) in instance.funcs() {
@@ -816,6 +991,15 @@ impl Default for PackageContext {
 
 impl std::fmt::Debug for PackageContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PackageContext").field("packages", &self.packages.iter().map(|(k, v)| PackageIdentifier::new(k.clone(), v.version.clone())).collect::<Vec<_>>()).finish()
+        f.debug_struct("PackageContext")
+            .field(
+                "packages",
+                &self
+                    .packages
+                    .iter()
+                    .map(|(k, v)| PackageIdentifier::new(k.clone(), v.version.clone()))
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
     }
 }
