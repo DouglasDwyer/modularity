@@ -1,4 +1,4 @@
-package test:guest@0.1.0
+package test:guest@0.1.1
 
 interface foo {
     // Selects the item in position n within list x

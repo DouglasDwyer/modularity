@@ -26,8 +26,9 @@ pub fn main() {
     while let Some(r) = take(&mut resolver) {
         match r.resolve() {
             Ok(x) => {
-                let ctx = PackageContext::new();
-                println!("The final results were {:?}", x.as_transition(&ctx));
+                let mut ctx = PackageContext::new();
+                ctx.apply(&mut store, x.as_transition(&ctx)).unwrap();
+                println!("The final results were {:?}", ctx);
             },
             Err(PackageResolverError::MissingPackages(x)) => {
                 let r = resolver.insert(x);
