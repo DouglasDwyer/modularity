@@ -676,6 +676,11 @@ impl<'a> PackageBuildOptions<'a> {
         &self.resolved.id
     }
 
+    /// The component that will be instantiated.
+    pub fn component(&self) -> &Component {
+        &self.resolved.component
+    }
+
     /// Gets an immutable reference to the linker which will resolve host imports.
     pub fn linker(&self) -> &Linker {
         &self.linker
