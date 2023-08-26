@@ -1,5 +1,9 @@
-#![allow(warnings)]
+#![deny(warnings)]
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
+#![warn(clippy::missing_docs_in_private_items)]
+
+//! Crate docs
 
 use anyhow::*;
 use anyhow::Error;
@@ -8,7 +12,6 @@ use bitvec::prelude::*;
 use fxhash::*;
 use semver::*;
 use std::borrow::*;
-use std::marker::*;
 use std::mem::*;
 use std::ops::*;
 use std::sync::*;
@@ -55,9 +58,12 @@ impl<'a> Ord for PartialVersionRef<'a> {
     }
 }
 
+/// A package that consists of an identifier and parsed binary.
 #[derive(Clone, Debug)]
 struct ResolvedPackage {
+    /// The ID of the package.
     pub id: PackageIdentifier,
+    /// The parsed component.
     pub component: Component
 }
 
@@ -139,11 +145,15 @@ pub struct PackageResolver {
     top_level_packages: FxHashMap<PackageName, Option<Version>>,
     /// The list of packages that the user has yet to resolve.
     unresolved_packages: Vec<UnresolvedPackage>,
+    /// The set of packages that are currently undergoing resolution.
     to_resolve: Vec<PackageIdentifier>,
+    /// The linker that will be used to resolve host imports.
     linker: Linker
 }
 
 impl PackageResolver {
+    /// Creates a new package resolver for the requested set of top-level packages and host linker.
+    /// Panics if the same package appears in the list multiple times.
     pub fn new(ids: impl IntoIterator<Item = PackageIdentifier>, linker: Linker) -> Self {
         let mut top_level_packages = FxHashMap::default();
 
@@ -166,10 +176,14 @@ impl PackageResolver {
         }
     }
 
+    /// The list of packages that must be provided for resolution to continue.
     pub fn unresolved(&mut self) -> &mut [UnresolvedPackage] {
         &mut self.unresolved_packages
     }
 
+    /// Attempts to resolve the dependency graph into a set of distinct, versioned packages.
+    /// Fails if more packages need to be provided, if packages have conflicting dependencies,
+    /// or if packages have cyclic dependencies.
     pub fn resolve(mut self) -> Result<PackageContextImage, PackageResolverError> {
         self.clear_unresolved();
         while let Some(next) = self.to_resolve.pop() {
@@ -213,6 +227,8 @@ impl PackageResolver {
         }
     }
 
+    /// Resets the dependency graph. Called after bumping the version of an existing
+    /// dependency during resolution.
     fn reset_graph(&mut self) {
         self.graph = TopoSort::new();
         self.unresolved_packages.clear();
@@ -226,6 +242,7 @@ impl PackageResolver {
         }
     }
 
+    /// Extracts the topologically-sorted list of dependencies from this resolver.
     fn into_package_topology(mut self) -> Result<PackageContextImage, PackageResolverError> {
         let mut res = PackageContextImageInner {
             packages: Vec::with_capacity(self.graph.len()),
@@ -243,6 +260,7 @@ impl PackageResolver {
         std::result::Result::Ok(PackageContextImage(Arc::new(res)))
     }
 
+    /// Loads a package's component and its transitive dependency list into the output image.
     fn load_packages_and_dependencies(&mut self, res: &mut PackageContextImageInner) -> Result<(), PackageResolverError> {
         for x in self.graph.nodes() {
             let name = x.map_err(|_| PackageResolverError::CyclicPackageDependency())?;
@@ -272,6 +290,7 @@ impl PackageResolver {
         std::result::Result::Ok(())
     }
 
+    /// Computes the transitive dependents for each package in the image.
     fn compute_inverse_dependencies(&self, res: &mut PackageContextImageInner) {
         for i in (0..res.packages.len()).rev() {
             let mut edit = res.transitive_dependents.edit(i);
@@ -283,6 +302,7 @@ impl PackageResolver {
         }
     }
 
+    /// Removes any newly-resolved packages from the list of requested external packages.
     fn clear_unresolved(&mut self) {
         let mut i = 0;
         self.unresolved_packages.retain(|resolved| {
@@ -301,6 +321,8 @@ impl PackageResolver {
         });
     }
 
+    /// Takes the maximum between two dependency versions, returning whether the version
+    /// changed in the process.
     fn upgrade(id: &PackageIdentifier, mut current: &mut Option<Version>, exact: bool) -> Result<bool, PackageResolverError> {
         if exact {
             if id.version() == current.as_ref() {
@@ -338,17 +360,26 @@ impl std::fmt::Debug for PackageResolver {
     }
 }
 
+/// Describes an issue with package dependency resolution.
 #[derive(Clone, Debug)]
 pub enum PackageResolverError {
+    /// Two or more packages were mutually dependent on each other.
     CyclicPackageDependency(),
+    /// The same package was required multiple times with conflicting
+    /// `semver` versions.
     IncompatibleVersions(PackageName, Option<Version>, Option<Version>),
+    /// The resolver needs additional packages to be supplied externally.
     MissingPackages(PackageResolver)
 }
 
+/// Describes a target state which can be applied to a [`PackageContext`]. Each
+/// `PackageContextImage` is an instantaneous "snapshot" of what a context should look
+/// like after loading and unloading the requisite packages.
 #[derive(Clone, Debug, Default)]
 pub struct PackageContextImage(Arc<PackageContextImageInner>);
 
 impl PackageContextImage {
+    /// Creates a transition for the given context based upon this image.
     fn as_transition<'a>(&'a self, ctx: &'a PackageContext) -> PackageContextTransitionBuilder<'a> {
         let mut transition = PackageContextTransitionBuilder {
             state: ctx.state,
@@ -369,14 +400,14 @@ impl PackageContextImage {
 
                 if old_dead[*old_i as usize] {
                     transition.to_unload.push(ctx.image.0.packages[*old_i as usize].id.clone());
-                    transition.to_load.push(PackageContextInstantiate { resolved: pkg, linker: Cow::Borrowed(&self.0.linker) });
+                    transition.to_load.push(PackageBuildOptions { resolved: pkg, linker: Cow::Borrowed(&self.0.linker) });
                 }
                 else {
                     old_touched.set(*old_i as usize, true);
                 }
             }
             else {
-                transition.to_load.push(PackageContextInstantiate { resolved: pkg, linker: Cow::Borrowed(&self.0.linker) });
+                transition.to_load.push(PackageBuildOptions { resolved: pkg, linker: Cow::Borrowed(&self.0.linker) });
             }
         }
 
@@ -389,18 +420,21 @@ impl PackageContextImage {
         transition
     }
 
+    /// Obtains an iterator over all packages that this one depends upon, directly or indirectly.
     pub fn transitive_dependencies<'a>(&'a self, id: &PackageIdentifier) -> impl 'a + Iterator<Item = &'a PackageIdentifier> {
         self.0.package_map.get(id.name()).and_then(|x| (&self.0.packages[*x as usize].id == id).then_some(x)).into_iter()
             .flat_map(|x| self.0.transitive_dependencies.get(*x as usize).iter_ones())
             .map(|x| &self.0.packages[x].id)
     }
 
+    /// Obtains an iterator over all packages that depend upon this one, directly or indirectly.
     pub fn transitive_dependents<'a>(&'a self, id: &PackageIdentifier) -> impl 'a + Iterator<Item = &'a PackageIdentifier> {
         self.0.package_map.get(id.name()).and_then(|x| (&self.0.packages[*x as usize].id == id).then_some(x)).into_iter()
             .flat_map(|x| self.0.transitive_dependents.get(*x as usize).iter_ones())
             .map(|x| &self.0.packages[x].id)
     }
 
+    /// Obtains an iterator over all top-level packages that depend upon this one, directly or indirectly.
     pub fn top_level_dependents<'a>(&'a self, id: &PackageIdentifier) -> impl 'a + Iterator<Item = &'a PackageIdentifier> {
         let mut tmp = self.0.top_level_packages.clone();
         
@@ -420,82 +454,122 @@ impl PackageContextImage {
     }
 }
 
+/// Stores the inner state for a package context.
 #[derive(Debug, Default)]
 struct PackageContextImageInner {
+    /// An indexed list of resolved packages.
     pub packages: Vec<ResolvedPackage>,
+    /// The indirect dependencies for each package.
     pub transitive_dependencies: PackageFlagsList,
+    /// The indirect dependents for each package.
     pub transitive_dependents: PackageFlagsList,
+    /// The subset of packages that are top-level.
     pub top_level_packages: BitVec,
+    /// A mapping from package name to index in the resolved list.
     pub package_map: FxHashMap<PackageName, u16>,
+    /// The host linker.
     pub linker: Linker
 }
 
+/// Facilitates the creation of new [`PackageContextTransition`]s, which switch the [`PackageContextImage`]
+/// upon which a context is based.
 pub struct PackageContextTransitionBuilder<'a> {
+    /// The original state of the context.
     state: u64,
+    /// The new image.
     image: &'a PackageContextImage,
-    to_load: Vec<PackageContextInstantiate<'a>>,
+    /// The list of packages to load, along with load options.
+    to_load: Vec<PackageBuildOptions<'a>>,
+    /// The list of packages to unload.
     to_unload: Vec<PackageIdentifier>,
 }
 
 impl<'a> PackageContextTransitionBuilder<'a> {
+    /// Creates a builder for switching the given context's state to a new image.
     pub fn new(image: &'a PackageContextImage, ctx: &'a PackageContext) -> Self {
         image.as_transition(ctx)
     }
 
-    pub fn to_instantiate(&self) -> &[PackageContextInstantiate] {
+    /// An immutable reference to the ordered list of packages that must be instantiated and loaded,
+    /// along with options on how to create instances of them.
+    pub fn to_load(&self) -> &[PackageBuildOptions<'a>] {
         &self.to_load
     }
 
-    pub fn to_instantiate_mut(&mut self) -> &mut [PackageContextInstantiate<'a>] {
+    /// A mutable reference to the ordered list of packages that must be instantiated and loaded,
+    /// along with options on how to create instances of them.
+    pub fn to_load_mut(&mut self) -> &mut [PackageBuildOptions<'a>] {
         &mut self.to_load
     }
 
+    /// The ordered list of packages that must be unloaded.
+    pub fn to_unload(&self) -> &[PackageIdentifier] {
+        &self.to_unload
+    }
+
+    /// Instantiates and links any new components to produce a final [`PackageContextTransition`].
     pub fn build(self, store: impl AsContextMut, ctx: &PackageContext) -> Result<PackageContextTransition> {
         ctx.create_next_state(store, self)
     }
 }
 
+/// Describes how to move a context between two [`PackageContextImage`]s.
 #[derive(Debug)]
 pub struct PackageContextTransition {
+    /// The original state of the context.
     state: u64,
+    /// The image to use.
     image: PackageContextImage,
+    /// The list of packages to load.
     to_load: Vec<PackageIdentifier>,
+    /// The list of packages to unload.
     to_unload: Vec<PackageIdentifier>,
+    /// The new set of packages for the context.
     packages: FxHashMap<PackageName, ResolvedInstance>
 }
 
 impl PackageContextTransition {
+    /// Applies this transition to the given context, updating the set of loaded packages.
     pub fn apply<T, E: wasm_runtime_layer::backend::WasmEngine>(self, store: &mut Store<T, E>, ctx: &mut PackageContext) -> Vec<Error> {
         ctx.apply(store, self)
     }
 
+    /// The image upon which this transition is based.
     pub fn image(&self) -> &PackageContextImage {
         &self.image
     }
 
+    /// The ordered list of packages that this transition will load.
     pub fn to_load(&self) -> &[PackageIdentifier] {
         &self.to_load
     }
 
+    /// The ordered list of packages that this transition will unload.
     pub fn to_unload(&self) -> &[PackageIdentifier] {
         &self.to_unload
     }
 }
 
-pub struct PackageContextInstantiate<'a> {
+/// Determines how a package's component should be instantiated and linked.
+pub struct PackageBuildOptions<'a> {
+    /// The resolved package.
     resolved: &'a ResolvedPackage,
+    /// The linker to use.
     linker: Cow<'a, Linker>
 }
 
-impl<'a> PackageContextInstantiate<'a> {
+impl<'a> PackageBuildOptions<'a> {
+    /// The associated package ID.
     pub fn id(&self) -> &PackageIdentifier {
         &self.resolved.id
     }
 
+    /// Gets an immutable reference to the linker which will resolve host imports.
     pub fn linker(&self) -> &Linker {
         &self.linker
     }
 
+    /// Gets a mutable reference to the linker which will resolve host imports.
     pub fn linker_mut(&mut self) -> &mut Linker {
         self.linker.to_mut()
     }
@@ -592,51 +666,72 @@ impl<'a> DerefMut for PackageFlagsListEdit<'a> {
     }
 }
 
+/// A package that consists of an identifier and an instantiated component.
 #[derive(Clone, Debug)]
 struct ResolvedInstance {
+    /// The version of the instance.
     version: Option<Version>,
+    /// The instantiated component.
     instance: Instance
 }
 
+/// Represents an instantiated WebAssembly component that is owned by a [`PackageContext`].
+#[derive(Debug)]
 pub struct LoadedPackage<'a> {
+    /// The package's ID.
     name: PackageIdentifier,
+    /// The instance associated with the package.
     instance: &'a Instance
 }
 
 impl<'a> LoadedPackage<'a> {
+    /// The identifier of the package.
     pub fn id(&self) -> &PackageIdentifier {
         &self.name
     }
 
+    /// The exports of the package.
     pub fn exports(&self) -> &Exports {
         self.instance.exports()
     }
 }
 
+/// Manages a set of loaded WebAssembly components. `PackageContext`s are responsible for loading, linking,
+/// and unloading packages to match the state described by a [`PackageContextImage`]. Contexts also
+/// provide access to the exports of loaded packages.
 pub struct PackageContext {
+    /// The state of the context.
     state: u64,
+    /// The context's image.
     image: PackageContextImage,
+    /// The set of currently-loaded packages.
     packages: FxHashMap<PackageName, ResolvedInstance>
 }
 
 impl PackageContext {
+    /// Creates a new package context with nothing loaded.
     pub fn new() -> Self {
         Self { state: Self::next_state(), image: PackageContextImage::default(), packages: FxHashMap::default() }
     }
 
+    /// The image upon which this context is based.
     pub fn image(&self) -> &PackageContextImage {
         &self.image
     }
 
+    /// Gets the package with the provided name, if any.
     pub fn package(&self, name: &PackageName) -> Option<LoadedPackage> {
         self.packages.get(name).map(|x| LoadedPackage { name: PackageIdentifier::new(name.clone(), x.version.clone()), instance: &x.instance })
     }
 
+    /// Gets an iterator over all loaded packages.
     pub fn packages(&self) -> impl '_ + Iterator<Item = LoadedPackage> {
         self.packages.iter().map(|(name, x)| LoadedPackage { name: PackageIdentifier::new(name.clone(), x.version.clone()), instance: &x.instance })
     }
 
+    /// Applies a state transition to this context.
     fn apply<T, E: wasm_runtime_layer::backend::WasmEngine>(&mut self, ctx: &mut Store<T, E>, transition: PackageContextTransition) -> Vec<Error> {
+        assert!(self.state == transition.state, "Transition was not created for the current context's state.");
         let mut errors = Vec::new();
         
         for to_unload in &transition.to_unload {
@@ -651,8 +746,9 @@ impl PackageContext {
         errors
     }
 
+    /// Creates a context transition from a builder.
     fn create_next_state(&self, mut ctx: impl AsContextMut, mut transition: PackageContextTransitionBuilder) -> Result<PackageContextTransition> {
-        ensure!(self.state == transition.state, "Transition was not created for the current context's state.");
+        assert!(self.state == transition.state, "Transition was not created for the current context's state.");
         let mut next_packages = self.packages.clone();
 
         for to_unload in &transition.to_unload {
@@ -669,7 +765,8 @@ impl PackageContext {
         Ok(PackageContextTransition { state: self.state, image: transition.image.clone(), to_load, to_unload: transition.to_unload, packages: next_packages })
     }
 
-    fn load_new(packages: &mut FxHashMap<PackageName, ResolvedInstance>, ctx: impl AsContextMut, step: &mut PackageContextInstantiate) -> Result<()> {
+    /// Instantiates a new package, linking all of its imports in the process.
+    fn load_new(packages: &mut FxHashMap<PackageName, ResolvedInstance>, ctx: impl AsContextMut, step: &mut PackageBuildOptions) -> Result<()> {
         let linker = step.linker.to_mut();
 
         for (interface, _) in step.resolved.component.imports().instances() {
@@ -687,6 +784,8 @@ impl PackageContext {
         Ok(())
     }
 
+    /// Adds all exports from the provided interface instantiation to the linker, failing if any
+    /// externals are already defined.
     fn fill_linker(linker: &mut Linker, id: &InterfaceIdentifier, instance: &ExportInstance) -> Result<()> {
         let to_fill = linker.define_instance(id.clone())?;
 
@@ -695,13 +794,15 @@ impl PackageContext {
         }
 
         for (name, resource_ty) in instance.resources() {
-            to_fill.define_resource(name, resource_ty);
+            to_fill.define_resource(name, resource_ty)?;
         }
 
         Ok(())
     }
 
+    /// Gets the next internal state which tracks that image that a context currently has.
     fn next_state() -> u64 {
+        /// A counter which ensures that each context state is unique.
         static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
         ID_COUNTER.fetch_add(1, Ordering::Relaxed)
     }
