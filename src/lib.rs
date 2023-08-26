@@ -144,7 +144,7 @@ enum PackageResolutionState {
 }
 
 /// Denotes a package that must be supplied for resolution to continue.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct UnresolvedPackage {
     /// Whether any candidate packages must match the version exactly.
     exact: bool,
@@ -205,7 +205,6 @@ impl UnresolvedPackage {
 }
 
 /// Builds a package dependency graph which can be converted to a [`PackageContextImage`].
-#[derive(Clone)]
 pub struct PackageResolver {
     /// The topological graph.
     graph: TopoSort<PackageName>,
@@ -485,6 +484,12 @@ impl PackageResolver {
     }
 }
 
+impl Clone for PackageResolver {
+    fn clone(&self) -> Self {
+        Self::new(self.top_level_packages.iter().map(|(k, v)| PackageIdentifier::new(k.clone(), v.clone())), self.linker.clone())
+    }
+}
+
 impl std::fmt::Debug for PackageResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PackageResolver").finish()
@@ -630,6 +635,7 @@ struct PackageContextImageInner {
 
 /// Facilitates the creation of new [`PackageContextTransition`]s, which switch the [`PackageContextImage`]
 /// upon which a context is based.
+#[derive(Debug)]
 pub struct PackageContextTransitionBuilder<'a> {
     /// The original state of the context.
     state: u64,
@@ -716,6 +722,7 @@ impl PackageContextTransition {
 }
 
 /// Determines how a package's component should be instantiated and linked.
+#[derive(Debug)]
 pub struct PackageBuildOptions<'a> {
     /// The resolved package.
     resolved: &'a ResolvedPackage,
