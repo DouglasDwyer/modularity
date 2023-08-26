@@ -5,9 +5,10 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.75"
+bitvec = "1.0.1"
 fxhash = "0.2.1"
 semver = "1.0.18"
-topological-sort = "0.2.2"
+topo_sort = "0.4.0"
 wasm_component_layer = "0.1.1"
 wasm_runtime_layer = "0.1.3"
 

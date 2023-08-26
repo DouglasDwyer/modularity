@@ -1,17 +1,26 @@
 #![allow(warnings)]
+#![forbid(unsafe_code)]
 
 use anyhow::*;
+use bitvec::access::*;
+use bitvec::prelude::*;
 use fxhash::*;
 use semver::*;
+use std::borrow::*;
 use std::mem::*;
+use std::ops::*;
 use std::sync::*;
-use topological_sort::*;
+use std::sync::atomic::*;
+use topo_sort::*;
 use wasm_component_layer::*;
 
+/// A wrapper that can compare `Option<Version>`s, treating `None` like a wildcard
+/// version that matches anything and is less than all other versions.
 #[derive(PartialEq, Eq)]
 struct PartialVersionRef<'a>(Option<&'a Version>);
 
 impl<'a> PartialVersionRef<'a> {    
+    /// Determines whether the `semver` equation `other = ^self` is satisfied.
     pub fn matches(&self, other: &Self) -> bool {
         match (&self.0, &other.0) {
             (None, None) => true,
@@ -45,45 +54,65 @@ impl<'a> Ord for PartialVersionRef<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub struct ResolvedPackage {
+struct ResolvedPackage {
     pub id: PackageIdentifier,
     pub component: Component
 }
 
+/// Stores transient information about a package during version resolution.
 #[derive(Clone, Debug)]
 struct PackageResolutionInfo {
+    /// The maximum version of the package loaded so far.
     pub version: Option<Version>,
+    /// Whether any candidate packages must match in version exactly.
     pub exact: bool,
+    /// Whether this package is resolved and in the component graph.
     pub state: PackageResolutionState
 }
 
+/// Denotes a package's current standing in the component graph.
 #[derive(Clone, Debug)]
 enum PackageResolutionState {
+    /// The package has a pending resolution request with the given index.
     Unresolved(u16),
+    /// The package has been resolved to a component.
     Resolved(Component),
+    /// The package has been resolved to a component, and a vertex representing
+    /// it has been added to the graph.
     InGraph(Component),
 }
 
+/// Denotes a package that must be supplied for resolution to continue.
 #[derive(Clone, Debug)]
 pub struct UnresolvedPackage {
+    /// Whether any candidate packages must match the version exactly.
     exact: bool,
+    /// The ID of the package.
     id: PackageIdentifier,
+    /// The selected component, if any.
     selected: Option<(PackageIdentifier, Component)>
 }
 
 impl UnresolvedPackage {
+    /// Gets the requested ID of this package.
     pub fn id(&self) -> &PackageIdentifier {
         &self.id
     }
 
+    /// Whether the resolved component must match in version exactly. Otherwise, any version
+    /// that is greater only in patch (satisfying the `semver` equation `actual = ^requested`)
+    /// is allowed.
     pub fn exact(&self) -> bool {
         self.exact
     }
 
+    /// Whether a component has been provided for this package.
     pub fn is_resolved(&self) -> bool {
         self.selected.is_some()
     }
 
+    /// Resolves this package using the given component and ID. The resolved component must match in name and
+    /// have a compatible version, otherwise, a panic will occur.
     pub fn resolve(&mut self, id: PackageIdentifier, component: Component) {
         assert!(self.id.name() == id.name(), "Package names were not the same.");
         if self.exact {
@@ -97,15 +126,19 @@ impl UnresolvedPackage {
     }
 }
 
-#[derive(Clone, Debug)]
+/// Builds a package dependency graph which can be converted to a [`PackageContextImage`].
+#[derive(Clone)]
 pub struct PackageResolver {
-    graph: TopologicalSort<PackageName>,
+    /// The topological graph.
+    graph: TopoSort<PackageName>,
+    /// The current versions and binaries of loaded packages.
     chosen_packages: FxHashMap<PackageName, PackageResolutionInfo>,
+    /// The top-level packages from which all dependencies originate.
     top_level_packages: FxHashMap<PackageName, Option<Version>>,
+    /// The list of packages that the user has yet to resolve.
     unresolved_packages: Vec<UnresolvedPackage>,
-    unresolved_packages_backing: Vec<UnresolvedPackage>,
     to_resolve: Vec<PackageIdentifier>,
-    linker: Arc<Linker>
+    linker: Linker
 }
 
 impl PackageResolver {
@@ -122,13 +155,12 @@ impl PackageResolver {
         }
 
         Self {
-            graph: TopologicalSort::default(),
-            chosen_packages: FxHashMap::default(),
+            graph: TopoSort::new(),
+            chosen_packages: FxHashMap::with_capacity_and_hasher(top_level_packages.len(), FxBuildHasher::default()),
             top_level_packages,
             unresolved_packages: Vec::with_capacity(to_resolve.len()),
-            unresolved_packages_backing: Vec::default(),
             to_resolve,
-            linker: Arc::new(linker)
+            linker
         }
     }
 
@@ -136,7 +168,7 @@ impl PackageResolver {
         &mut self.unresolved_packages
     }
 
-    pub fn resolve(mut self) -> Result<Vec<ResolvedPackage>, PackageResolverError> {
+    pub fn resolve(mut self) -> Result<PackageContextImage, PackageResolverError> {
         self.clear_unresolved();
         while let Some(next) = self.to_resolve.pop() {
             if let Some(info) = self.chosen_packages.get_mut(next.name()) {
@@ -151,26 +183,15 @@ impl PackageResolver {
                             self.unresolved_packages.push(UnresolvedPackage { exact: self.top_level_packages.contains_key(next.name()), id: next, selected: None });
                         },
                         PackageResolutionState::InGraph(_) => {
-                            self.graph = TopologicalSort::default();
-                            self.unresolved_packages.clear();
-                            self.to_resolve.clear();
-                            self.to_resolve.extend(self.top_level_packages.iter().map(|(a, b)| PackageIdentifier::new(a.clone(), b.clone())));
-    
-                            for pkg in self.chosen_packages.values_mut() {
-                                if let PackageResolutionState::InGraph(x) = &mut pkg.state {
-                                    pkg.state = PackageResolutionState::Resolved(x.clone());
-                                }
-                            }
+                            self.reset_graph();
                         },
                     }
                 }
                 else if let PackageResolutionState::Resolved(x) = &mut info.state {
-                    self.graph.insert(next.name().clone());
-                    
-                    for interface in x.imports().instances().filter_map(|(x, _)| self.linker.instance(x).is_none().then_some(x)) {
-                        self.graph.add_dependency(interface.package().name().clone(), next.name().clone());
-                        self.to_resolve.push(interface.package().clone());
-                    }
+                    self.graph.insert(next.name().clone(), x.imports().instances().filter_map(|(x, _)| self.linker.instance(x).is_none().then(|| {
+                        self.to_resolve.push(x.package().clone());
+                        x.package().name().clone()
+                    })));
 
                     info.state = PackageResolutionState::InGraph(x.clone());
                 }                
@@ -190,43 +211,85 @@ impl PackageResolver {
         }
     }
 
-    fn into_package_topology(mut self) -> Result<Vec<ResolvedPackage>, PackageResolverError> {
-        let mut res = Vec::with_capacity(self.graph.len());
+    fn reset_graph(&mut self) {
+        self.graph = TopoSort::new();
+        self.unresolved_packages.clear();
+        self.to_resolve.clear();
+        self.to_resolve.extend(self.top_level_packages.iter().map(|(a, b)| PackageIdentifier::new(a.clone(), b.clone())));
+    
+        for pkg in self.chosen_packages.values_mut() {
+            if let PackageResolutionState::InGraph(x) = &mut pkg.state {
+                pkg.state = PackageResolutionState::Resolved(x.clone());
+            }
+        }
+    }
 
-        while let Some(name) = self.graph.pop() {
-            let chosen = &self.chosen_packages[&name];
+    fn into_package_topology(mut self) -> Result<PackageContextImage, PackageResolverError> {
+        let mut res = PackageContextImageInner {
+            packages: Vec::with_capacity(self.graph.len()),
+            transitive_dependencies: PackageFlagsList::new(false, self.graph.len()),
+            transitive_dependents: PackageFlagsList::new(false, self.graph.len()),
+            package_map: FxHashMap::with_capacity_and_hasher(self.graph.len(), FxBuildHasher::default()),
+            linker: Linker::default()
+        };
+
+        self.load_packages_and_dependencies(&mut res)?;
+        self.compute_inverse_dependencies(&mut res);
+        res.linker = self.linker;
+
+        std::result::Result::Ok(PackageContextImage(Arc::new(res)))
+    }
+
+    fn load_packages_and_dependencies(&mut self, res: &mut PackageContextImageInner) -> Result<(), PackageResolverError> {
+        for x in self.graph.nodes() {
+            let name = x.map_err(|_| PackageResolverError::CyclicPackageDependency())?;
+            let chosen = &self.chosen_packages[name];
             if let PackageResolutionState::InGraph(x) = &chosen.state {
-                res.push(ResolvedPackage { id: PackageIdentifier::new(name.clone(), chosen.version.clone()), component: x.clone() });
+                let idx = res.packages.len();
+                res.package_map.insert(name.clone(), idx as u16);
+                res.packages.push(ResolvedPackage { id: PackageIdentifier::new(name.clone(), chosen.version.clone()), component: x.clone() });
+        
+                let mut edit = res.transitive_dependencies.edit(idx);
+                edit.set(idx, true);
+                for dependency in &self.graph[name] {
+                    edit.or_with(res.package_map[dependency] as usize);
+                }
             }
             else {
                 unreachable!();
             }
         }
 
-        if self.graph.len() > 0 {
-            std::result::Result::Err(PackageResolverError::CyclicPackageDependency())
-        }
-        else {
-            std::result::Result::Ok(res)
+        std::result::Result::Ok(())
+    }
+
+    fn compute_inverse_dependencies(&self, res: &mut PackageContextImageInner) {
+        for i in (0..res.packages.len()).rev() {
+            let mut edit = res.transitive_dependents.edit(i);
+            edit.set(i, true);
+            let name = res.packages[i].id.name();
+            for i in &self.graph[name] {
+                edit.or_into(res.package_map[i] as usize);
+            }
         }
     }
 
     fn clear_unresolved(&mut self) {
-        for resolved in self.unresolved_packages.drain(..) {
-            if let Some((id, pkg)) = resolved.selected {
+        let mut i = 0;
+        self.unresolved_packages.retain(|resolved| {
+            if let Some((id, pkg)) = &resolved.selected {
                 let info = self.chosen_packages.get_mut(id.name()).expect("Package was not in map.");
                 info.version = id.version().cloned();
-                info.state = PackageResolutionState::Resolved(pkg);
-                self.to_resolve.push(id);
+                info.state = PackageResolutionState::Resolved(pkg.clone());
+                self.to_resolve.push(id.clone());
+                false
             }
             else {
-                let index = self.unresolved_packages_backing.len() as u16;
-                self.chosen_packages.get_mut(resolved.id.name()).expect("Package was not in map.").state = PackageResolutionState::Unresolved(index);
-                self.unresolved_packages_backing.push(resolved);
+                self.chosen_packages.get_mut(resolved.id.name()).expect("Package was not in map.").state = PackageResolutionState::Unresolved(i);
+                i += 1;
+                true
             }
-        }
-        
-        swap(&mut self.unresolved_packages, &mut self.unresolved_packages_backing);
+        });
     }
 
     fn upgrade(id: &PackageIdentifier, mut current: &mut Option<Version>, exact: bool) -> Result<bool, PackageResolverError> {
@@ -260,9 +323,244 @@ impl PackageResolver {
     }
 }
 
+impl std::fmt::Debug for PackageResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PackageResolver").finish()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum PackageResolverError {
     CyclicPackageDependency(),
     IncompatibleVersions(PackageName, Option<Version>, Option<Version>),
     MissingPackages(PackageResolver)
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PackageContextImage(Arc<PackageContextImageInner>);
+
+impl PackageContextImage {
+    pub fn as_transition(&self, ctx: &PackageContext) -> PackageContextTransition {
+        let mut transition = PackageContextTransition {
+            state: ctx.state,
+            image: self,
+            steps: Vec::with_capacity(self.0.packages.len() + ctx.packages.len())
+        };
+
+        let mut old_touched_dead = BitVec::<usize, Lsb0>::repeat(false, 2 * ctx.packages.len());
+        let (old_touched, old_dead) = old_touched_dead.split_at_mut(ctx.packages.len());
+
+        for i in 0..self.0.packages.len() {
+            let pkg = &self.0.packages[i];
+            if let Some(old_i) = ctx.image.0.package_map.get(pkg.id.name()) {
+                if pkg.id != ctx.image.0.packages[*old_i as usize].id {
+                    old_dead[..] |= ctx.image.0.transitive_dependents.get(*old_i as usize);
+                }
+
+                if old_dead[*old_i as usize] {
+                    transition.steps.push(PackageContextTransitionStep::UnloadPackage(UnloadPackage { id: Cow::Owned(ctx.image.0.packages[*old_i as usize].id.clone()) }));
+                    transition.steps.push(PackageContextTransitionStep::LoadPackage(LoadPackage { package: pkg, linker: Cow::Borrowed(&self.0.linker) }));
+                }
+                else {
+                    old_touched.set(*old_i as usize, true);
+                }
+            }
+            else {
+                transition.steps.push(PackageContextTransitionStep::LoadPackage(LoadPackage { package: pkg, linker: Cow::Borrowed(&self.0.linker) }));
+            }
+        }
+
+        for i in old_touched.iter_zeros() {
+            transition.steps.push(PackageContextTransitionStep::UnloadPackage(UnloadPackage { id: Cow::Owned(ctx.image.0.packages[i].id.clone()) }))
+        }
+
+        transition
+    }
+}
+
+#[derive(Debug, Default)]
+struct PackageContextImageInner {
+    pub packages: Vec<ResolvedPackage>,
+    pub transitive_dependencies: PackageFlagsList,
+    pub transitive_dependents: PackageFlagsList,
+    pub package_map: FxHashMap<PackageName, u16>,
+    pub linker: Linker
+}
+
+#[derive(Debug)]
+pub struct PackageContextTransition<'a> {
+    state: u64,
+    image: &'a PackageContextImage,
+    steps: Vec<PackageContextTransitionStep<'a>>
+}
+
+impl<'a> PackageContextTransition<'a> {
+    pub fn image(&self) -> &PackageContextImage {
+        self.image
+    }
+
+    pub fn steps(&self) -> &[PackageContextTransitionStep<'a>] {
+        &self.steps
+    }
+
+    pub fn steps_mut(&mut self) -> &mut [PackageContextTransitionStep<'a>] {
+        &mut self.steps
+    }
+}
+
+#[derive(Debug)]
+pub enum PackageContextTransitionStep<'a> {
+    LoadPackage(LoadPackage<'a>),
+    UnloadPackage(UnloadPackage<'a>)
+}
+
+#[derive(Debug)]
+pub struct LoadPackage<'a> {
+    package: &'a ResolvedPackage,
+    linker: Cow<'a, Linker>
+}
+
+impl<'a> LoadPackage<'a> {
+    pub fn id(&self) -> &PackageIdentifier {
+        &self.package.id
+    }
+
+    pub fn linker(&self) -> &Linker {
+        &self.linker
+    }
+
+    pub fn linker_mut(&mut self) -> &mut Linker {
+        self.linker.to_mut()
+    }
+}
+
+#[derive(Debug)]
+pub struct UnloadPackage<'a> {
+    id: Cow<'a, PackageIdentifier>
+}
+
+impl<'a> UnloadPackage<'a> {
+    pub fn id(&self) -> &PackageIdentifier {
+        &self.id
+    }
+}
+
+/// Represents a densely-packed list of lists of bitflags used to store
+/// per-package information about other packages.
+#[derive(Clone, Debug, Default)]
+struct PackageFlagsList {
+    /// The underlying data buffer.
+    data: BitVec,
+    /// The amount of bits per package.
+    stride: usize,
+}
+
+impl PackageFlagsList {
+    /// Creates a new list of package flags, initialized to the given value.
+    #[inline(always)]
+    pub fn new(bit: bool, size: usize) -> Self {
+        Self {
+            data: BitVec::repeat(bit, size * size),
+            stride: size,
+        }
+    }
+
+    /// Initializes an edit of the flags for the given package, allowing for the
+    /// simultaneous immutable use of flags with smaller indices during the edit.
+    #[inline(always)]
+    pub fn edit(&mut self, index: usize) -> PackageFlagsListEdit {
+        let (rest, first) = self.data.split_at_mut(index * self.stride);
+
+        PackageFlagsListEdit {
+            editable: &mut first[..self.stride],
+            rest,
+            stride: self.stride,
+        }
+    }
+
+    /// Gets a slice associated with the given package at the provided index.
+    #[inline(always)]
+    pub fn get(&self, index: usize) -> &BitSlice {
+        let base = index * self.stride;
+        &self.data[base..base + self.stride]
+    }
+}
+
+impl BitOrAssign<&PackageFlagsList> for PackageFlagsList {
+    #[inline(always)]
+    fn bitor_assign(&mut self, rhs: &PackageFlagsList) {
+        self.data |= &rhs.data;
+    }
+}
+
+/// Represents an ongoing edit operation to a package flags list. This allows
+/// for editing one part of the list while referencing other parts.
+struct PackageFlagsListEdit<'a> {
+    /// The part of the bit vector that is being edited.
+    editable: &'a mut BitSlice<BitSafeUsize>,
+    /// Everything prior to the editable part which may be immutably referenced.
+    rest: &'a mut BitSlice<BitSafeUsize>,
+    /// The number of bits per package.
+    stride: usize,
+}
+
+impl<'a> PackageFlagsListEdit<'a> {
+    /// Computes the bitwise or into the editable region with the package at the given index.
+    #[inline(always)]
+    pub fn or_with(&mut self, index: usize) {
+        let base = index * self.stride;
+        *self.editable |= &self.rest[base..base + self.stride];
+    }
+
+    /// Computes the bitwise or of the editable region with the package into the given index.
+    #[inline(always)]
+    pub fn or_into(&mut self, index: usize) {
+        let base = index * self.stride;
+        self.rest[base..base + self.stride] |= &*self.editable;
+    }
+}
+
+impl<'a> Deref for PackageFlagsListEdit<'a> {
+    type Target = BitSlice<BitSafeUsize>;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        self.editable
+    }
+}
+
+impl<'a> DerefMut for PackageFlagsListEdit<'a> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.editable
+    }
+}
+
+pub struct PackageContext {
+    state: u64,
+    image: PackageContextImage,
+    packages: Vec<Instance>
+}
+
+impl PackageContext {
+    pub fn new() -> Self {
+        Self { state: Self::next_state(), image: PackageContextImage::default(), packages: Vec::new() }
+    }
+
+    pub fn apply(&mut self, transition: PackageContextTransition) -> Result<()> {
+        ensure!(self.state == transition.state, "Transition was not created for the current context's state.");
+
+        todo!()
+    }
+
+    fn next_state() -> u64 {
+        static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+        ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+impl Default for PackageContext {
+    fn default() -> Self {
+        Self::new()
+    }
 }

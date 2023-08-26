@@ -25,12 +25,14 @@ pub fn main() {
 
     while let Some(r) = take(&mut resolver) {
         match r.resolve() {
-            Ok(x) => println!("The final results were {x:?}"),
+            Ok(x) => {
+                let ctx = PackageContext::new();
+                println!("The final results were {:?}", x.as_transition(&ctx));
+            },
             Err(PackageResolverError::MissingPackages(x)) => {
                 let r = resolver.insert(x);
                 
                 for u in r.unresolved() {
-                    println!("Resolving {}", u.id());
                     let (id, component) = packages.iter().find(|(id, _)| id.name() == u.id().name() && u.id().version().zip(id.version()).map(|(a, b)| a <= b).unwrap_or(true)).unwrap();
                     u.resolve(id.clone(), component.clone());
                 }
