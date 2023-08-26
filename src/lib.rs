@@ -8,6 +8,7 @@ use bitvec::prelude::*;
 use fxhash::*;
 use semver::*;
 use std::borrow::*;
+use std::marker::*;
 use std::mem::*;
 use std::ops::*;
 use std::sync::*;
@@ -230,6 +231,7 @@ impl PackageResolver {
             packages: Vec::with_capacity(self.graph.len()),
             transitive_dependencies: PackageFlagsList::new(false, self.graph.len()),
             transitive_dependents: PackageFlagsList::new(false, self.graph.len()),
+            top_level_packages: BitVec::repeat(false, self.graph.len()),
             package_map: FxHashMap::with_capacity_and_hasher(self.graph.len(), FxBuildHasher::default()),
             linker: Linker::default()
         };
@@ -245,8 +247,14 @@ impl PackageResolver {
         for x in self.graph.nodes() {
             let name = x.map_err(|_| PackageResolverError::CyclicPackageDependency())?;
             let chosen = &self.chosen_packages[name];
+
             if let PackageResolutionState::InGraph(x) = &chosen.state {
                 let idx = res.packages.len();
+                
+                if chosen.exact {
+                    res.top_level_packages.set(idx, true);
+                }
+
                 res.package_map.insert(name.clone(), idx as u16);
                 res.packages.push(ResolvedPackage { id: PackageIdentifier::new(name.clone(), chosen.version.clone()), component: x.clone() });
         
@@ -341,15 +349,13 @@ pub enum PackageResolverError {
 pub struct PackageContextImage(Arc<PackageContextImageInner>);
 
 impl PackageContextImage {
-    pub fn as_transition(&self, ctx: &PackageContext) -> PackageContextTransition {
-        let mut transition = PackageContextTransition {
+    fn as_transition<'a>(&'a self, ctx: &'a PackageContext) -> PackageContextTransitionBuilder<'a> {
+        let mut transition = PackageContextTransitionBuilder {
             state: ctx.state,
             image: self,
-            steps: Vec::with_capacity(self.0.packages.len() + ctx.packages.len()),
-            num_removed: 0
+            to_load: Vec::with_capacity(self.0.packages.len()),
+            to_unload: Vec::with_capacity(ctx.packages.len())
         };
-
-        let mut add_steps = Vec::with_capacity(self.0.packages.len());
 
         let mut old_touched_dead = BitVec::<usize, Lsb0>::repeat(false, 2 * ctx.packages.len());
         let (old_touched, old_dead) = old_touched_dead.split_at_mut(ctx.packages.len());
@@ -362,27 +368,55 @@ impl PackageContextImage {
                 }
 
                 if old_dead[*old_i as usize] {
-                    transition.steps.push(PackageContextTransitionStep::UnloadPackage(UnloadPackage { id: Cow::Owned(ctx.image.0.packages[*old_i as usize].id.clone()) }));
-                    add_steps.push(PackageContextTransitionStep::LoadPackage(LoadPackage { package: pkg, linker: Cow::Borrowed(&self.0.linker) }));
+                    transition.to_unload.push(ctx.image.0.packages[*old_i as usize].id.clone());
+                    transition.to_load.push(PackageContextInstantiate { resolved: pkg, linker: Cow::Borrowed(&self.0.linker) });
                 }
                 else {
                     old_touched.set(*old_i as usize, true);
                 }
             }
             else {
-                add_steps.push(PackageContextTransitionStep::LoadPackage(LoadPackage { package: pkg, linker: Cow::Borrowed(&self.0.linker) }));
+                transition.to_load.push(PackageContextInstantiate { resolved: pkg, linker: Cow::Borrowed(&self.0.linker) });
             }
         }
 
         for i in old_touched.iter_zeros() {
-            transition.steps.push(PackageContextTransitionStep::UnloadPackage(UnloadPackage { id: Cow::Owned(ctx.image.0.packages[i].id.clone()) }))
+            transition.to_unload.push(ctx.image.0.packages[i].id.clone());
         }
 
-        transition.num_removed = transition.steps.len();
-        transition.steps.reverse();
-        transition.steps.extend(add_steps);
+        transition.to_unload.reverse();
 
         transition
+    }
+
+    pub fn transitive_dependencies<'a>(&'a self, id: &PackageIdentifier) -> impl 'a + Iterator<Item = &'a PackageIdentifier> {
+        self.0.package_map.get(id.name()).and_then(|x| (&self.0.packages[*x as usize].id == id).then_some(x)).into_iter()
+            .flat_map(|x| self.0.transitive_dependencies.get(*x as usize).iter_ones())
+            .map(|x| &self.0.packages[x].id)
+    }
+
+    pub fn transitive_dependents<'a>(&'a self, id: &PackageIdentifier) -> impl 'a + Iterator<Item = &'a PackageIdentifier> {
+        self.0.package_map.get(id.name()).and_then(|x| (&self.0.packages[*x as usize].id == id).then_some(x)).into_iter()
+            .flat_map(|x| self.0.transitive_dependents.get(*x as usize).iter_ones())
+            .map(|x| &self.0.packages[x].id)
+    }
+
+    pub fn top_level_dependents<'a>(&'a self, id: &PackageIdentifier) -> impl 'a + Iterator<Item = &'a PackageIdentifier> {
+        let mut tmp = self.0.top_level_packages.clone();
+        
+        if let Some(pkg) = self.0.package_map.get(id.name()) {
+            if &self.0.packages[*pkg as usize].id == id {
+                tmp[..] &= self.0.transitive_dependents.get(*pkg as usize);
+            }
+            else {
+                tmp.fill(false);
+            }
+        }
+        else {
+            tmp.fill(false);
+        }
+
+        tmp.iter_ones().collect::<Vec<_>>().into_iter().map(|x| &self.0.packages[x].id)
     }
 }
 
@@ -391,49 +425,71 @@ struct PackageContextImageInner {
     pub packages: Vec<ResolvedPackage>,
     pub transitive_dependencies: PackageFlagsList,
     pub transitive_dependents: PackageFlagsList,
+    pub top_level_packages: BitVec,
     pub package_map: FxHashMap<PackageName, u16>,
     pub linker: Linker
 }
 
-
-
-#[derive(Debug)]
-pub struct PackageContextTransition<'a> {
+pub struct PackageContextTransitionBuilder<'a> {
     state: u64,
     image: &'a PackageContextImage,
-    steps: Vec<PackageContextTransitionStep<'a>>,
-    num_removed: usize
+    to_load: Vec<PackageContextInstantiate<'a>>,
+    to_unload: Vec<PackageIdentifier>,
 }
 
-impl<'a> PackageContextTransition<'a> {
+impl<'a> PackageContextTransitionBuilder<'a> {
+    pub fn new(image: &'a PackageContextImage, ctx: &'a PackageContext) -> Self {
+        image.as_transition(ctx)
+    }
+
+    pub fn to_instantiate(&self) -> &[PackageContextInstantiate] {
+        &self.to_load
+    }
+
+    pub fn to_instantiate_mut(&mut self) -> &mut [PackageContextInstantiate<'a>] {
+        &mut self.to_load
+    }
+
+    pub fn build(self, store: impl AsContextMut, ctx: &PackageContext) -> Result<PackageContextTransition> {
+        ctx.create_next_state(store, self)
+    }
+}
+
+#[derive(Debug)]
+pub struct PackageContextTransition {
+    state: u64,
+    image: PackageContextImage,
+    to_load: Vec<PackageIdentifier>,
+    to_unload: Vec<PackageIdentifier>,
+    packages: FxHashMap<PackageName, ResolvedInstance>
+}
+
+impl PackageContextTransition {
+    pub fn apply<T, E: wasm_runtime_layer::backend::WasmEngine>(self, store: &mut Store<T, E>, ctx: &mut PackageContext) -> Vec<Error> {
+        ctx.apply(store, self)
+    }
+
     pub fn image(&self) -> &PackageContextImage {
-        self.image
+        &self.image
     }
 
-    pub fn steps(&self) -> &[PackageContextTransitionStep<'a>] {
-        &self.steps
+    pub fn to_load(&self) -> &[PackageIdentifier] {
+        &self.to_load
     }
 
-    pub fn steps_mut(&mut self) -> &mut [PackageContextTransitionStep<'a>] {
-        &mut self.steps
+    pub fn to_unload(&self) -> &[PackageIdentifier] {
+        &self.to_unload
     }
 }
 
-#[derive(Debug)]
-pub enum PackageContextTransitionStep<'a> {
-    LoadPackage(LoadPackage<'a>),
-    UnloadPackage(UnloadPackage<'a>)
-}
-
-#[derive(Debug)]
-pub struct LoadPackage<'a> {
-    package: &'a ResolvedPackage,
+pub struct PackageContextInstantiate<'a> {
+    resolved: &'a ResolvedPackage,
     linker: Cow<'a, Linker>
 }
 
-impl<'a> LoadPackage<'a> {
+impl<'a> PackageContextInstantiate<'a> {
     pub fn id(&self) -> &PackageIdentifier {
-        &self.package.id
+        &self.resolved.id
     }
 
     pub fn linker(&self) -> &Linker {
@@ -442,17 +498,6 @@ impl<'a> LoadPackage<'a> {
 
     pub fn linker_mut(&mut self) -> &mut Linker {
         self.linker.to_mut()
-    }
-}
-
-#[derive(Debug)]
-pub struct UnloadPackage<'a> {
-    id: Cow<'a, PackageIdentifier>
-}
-
-impl<'a> UnloadPackage<'a> {
-    pub fn id(&self) -> &PackageIdentifier {
-        &self.id
     }
 }
 
@@ -547,10 +592,25 @@ impl<'a> DerefMut for PackageFlagsListEdit<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ResolvedInstance {
     version: Option<Version>,
     instance: Instance
+}
+
+pub struct LoadedPackage<'a> {
+    name: PackageIdentifier,
+    instance: &'a Instance
+}
+
+impl<'a> LoadedPackage<'a> {
+    pub fn id(&self) -> &PackageIdentifier {
+        &self.name
+    }
+
+    pub fn exports(&self) -> &Exports {
+        self.instance.exports()
+    }
 }
 
 pub struct PackageContext {
@@ -564,79 +624,67 @@ impl PackageContext {
         Self { state: Self::next_state(), image: PackageContextImage::default(), packages: FxHashMap::default() }
     }
 
-    pub fn apply<T, E: wasm_runtime_layer::backend::WasmEngine>(&mut self, ctx: &mut Store<T, E>, mut transition: PackageContextTransition) -> Result<Vec<Error>> {
-        ensure!(self.state == transition.state, "Transition was not created for the current context's state.");
-
-        let to_unload = self.separate_outdated_packages(&transition);
-        
-        for i in transition.num_removed..transition.steps.len() {
-            if let PackageContextTransitionStep::LoadPackage(step) = &mut transition.steps[i] {
-                match self.load_new(ctx.as_context_mut(), step) {
-                    std::result::Result::Ok(()) => continue,
-                    std::result::Result::Err(err) => {
-                        self.reset_from_transition(i, &transition, to_unload);
-                        return Err(err);
-                    }
-                }
-            }
-            else {
-                unreachable!();
-            }   
-        }
-
-        self.state = Self::next_state();
-        self.image = transition.image.clone();
-        
-        let mut errors = Vec::new();
-        for (_, inst) in to_unload {
-            errors.extend(inst.instance.drop(ctx).expect("Could not drop instance."));
-        }
-
-        Ok(errors)
+    pub fn image(&self) -> &PackageContextImage {
+        &self.image
     }
 
-    fn load_new(&mut self, ctx: impl AsContextMut, step: &mut LoadPackage) -> Result<()> {
+    pub fn package(&self, name: &PackageName) -> Option<LoadedPackage> {
+        self.packages.get(name).map(|x| LoadedPackage { name: PackageIdentifier::new(name.clone(), x.version.clone()), instance: &x.instance })
+    }
+
+    pub fn packages(&self) -> impl '_ + Iterator<Item = LoadedPackage> {
+        self.packages.iter().map(|(name, x)| LoadedPackage { name: PackageIdentifier::new(name.clone(), x.version.clone()), instance: &x.instance })
+    }
+
+    fn apply<T, E: wasm_runtime_layer::backend::WasmEngine>(&mut self, ctx: &mut Store<T, E>, transition: PackageContextTransition) -> Vec<Error> {
+        let mut errors = Vec::new();
+        
+        for to_unload in &transition.to_unload {
+            let inst = self.packages.remove(to_unload.name()).expect("Could not find instance.");
+            errors.extend(inst.instance.drop(ctx).expect("Could not drop instance."));
+        }
+        
+        self.state = Self::next_state();
+        self.packages = transition.packages;
+        self.image = transition.image;
+
+        errors
+    }
+
+    fn create_next_state(&self, mut ctx: impl AsContextMut, mut transition: PackageContextTransitionBuilder) -> Result<PackageContextTransition> {
+        ensure!(self.state == transition.state, "Transition was not created for the current context's state.");
+        let mut next_packages = self.packages.clone();
+
+        for to_unload in &transition.to_unload {
+            assert!(next_packages.remove(to_unload.name()).is_some(), "Did not find package to remove");
+        }
+
+        let mut to_load = Vec::with_capacity(transition.to_load.len());
+        
+        for step in &mut transition.to_load {
+            to_load.push(step.resolved.id.clone());
+            Self::load_new(&mut next_packages, ctx.as_context_mut(), step)?;
+        }
+
+        Ok(PackageContextTransition { state: self.state, image: transition.image.clone(), to_load, to_unload: transition.to_unload, packages: next_packages })
+    }
+
+    fn load_new(packages: &mut FxHashMap<PackageName, ResolvedInstance>, ctx: impl AsContextMut, step: &mut PackageContextInstantiate) -> Result<()> {
         let linker = step.linker.to_mut();
 
-        for (interface, _) in step.package.component.imports().instances() {
-            let exporting_package = &self.packages[interface.package().name()];
+        for (interface, _) in step.resolved.component.imports().instances() {
+            let exporting_package = &packages[interface.package().name()];
             let name = InterfaceIdentifier::new(PackageIdentifier::new(interface.package().name().clone(), exporting_package.version.clone()), interface.name());
             if let Some(exported) = exporting_package.instance.exports().instance(&name) {
                 Self::fill_linker(linker, interface, exported)?;
             }
             else {
-                bail!("Package {} required missing interface {interface}", step.package.id);
+                bail!("Package {} required missing interface {interface}", step.resolved.id);
             }
         }
 
-        assert!(self.packages.insert(step.package.id.name().clone(), ResolvedInstance { version: step.package.id.version().cloned(), instance: linker.instantiate(ctx, &step.package.component)? }).is_none(), "Added duplicate packages.");
+        assert!(packages.insert(step.resolved.id.name().clone(), ResolvedInstance { version: step.resolved.id.version().cloned(), instance: linker.instantiate(ctx, &step.resolved.component)? }).is_none(), "Added duplicate packages.");
         Ok(())
-    }
-
-    fn reset_from_transition(&mut self, end: usize, transition: &PackageContextTransition, to_reload: Vec<(PackageName, ResolvedInstance)>) {
-        for i in transition.num_removed..end {
-            if let PackageContextTransitionStep::LoadPackage(step) = &transition.steps[i] {
-                self.packages.remove(step.package.id.name());
-            }
-            else {
-                unreachable!();
-            }
-        }
-
-        self.packages.extend(to_reload);
-    }
-
-    fn separate_outdated_packages(&mut self, transition: &PackageContextTransition) -> Vec<(PackageName, ResolvedInstance)> {
-        let mut to_unload = Vec::with_capacity(transition.num_removed);
-        for i in 0..transition.num_removed {
-            if let PackageContextTransitionStep::UnloadPackage(UnloadPackage { id }) = &transition.steps[i] {
-                to_unload.push(self.packages.remove_entry(id.name()).expect("Package was not available"));
-            }
-            else {
-                unreachable!();
-            }
-        }
-        to_unload
     }
 
     fn fill_linker(linker: &mut Linker, id: &InterfaceIdentifier, instance: &ExportInstance) -> Result<()> {
@@ -667,6 +715,6 @@ impl Default for PackageContext {
 
 impl std::fmt::Debug for PackageContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PackageContext").field("packages", &self.packages).finish()
+        f.debug_struct("PackageContext").field("packages", &self.packages.iter().map(|(k, v)| PackageIdentifier::new(k.clone(), v.version.clone())).collect::<Vec<_>>()).finish()
     }
 }

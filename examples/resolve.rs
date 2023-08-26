@@ -27,8 +27,22 @@ pub fn main() {
         match r.resolve() {
             Ok(x) => {
                 let mut ctx = PackageContext::new();
-                ctx.apply(&mut store, x.as_transition(&ctx)).unwrap();
-                println!("The final results were {:?}", ctx);
+                let transition = PackageContextTransitionBuilder::new(&x, &ctx).build(&mut store, &ctx).unwrap();
+                assert!(transition.apply(&mut store, &mut ctx).is_empty(), "Errors occurred during transition.");
+                println!("The context was {:?}", ctx);
+
+                let pkg = ctx.package(&"test:guest4".try_into().unwrap()).unwrap();
+                let select_nth = pkg.exports().instance(&"test:guest4/bar".try_into().unwrap()).unwrap().func("select-nth").unwrap().typed::<(Vec<String>, u32), (String,)>().unwrap();
+                
+                let example = ["a", "b", "c"]
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+
+                println!(
+                    "Calling select-nth({example:?}, 1) == {}",
+                    select_nth.call(&mut store, (example.clone(), 1)).unwrap().0
+                );
             },
             Err(PackageResolverError::MissingPackages(x)) => {
                 let r = resolver.insert(x);
