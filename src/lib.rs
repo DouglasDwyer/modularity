@@ -84,7 +84,7 @@ impl<'a> PartialVersionRef<'a> {
             (None, None) => true,
             (Some(_), None) => false,
             (None, Some(_)) => true,
-            (Some(a), Some(b)) => a.major == b.major && a.minor == b.minor && a.patch <= b.patch,
+            (Some(a), Some(b)) => a.major == b.major && a.minor == b.minor && a <= b,
         }
     }
 }
@@ -459,17 +459,26 @@ impl PackageResolver {
                 (Some(_), None) => std::result::Result::Ok(false),
                 (Some(a), Some(b)) => {
                     if a.major == b.major && a.minor == b.minor {
-                        if a.patch < b.patch {
-                            a.patch = b.patch;
-                            std::result::Result::Ok(true)
-                        } else if a.patch == b.patch && a.pre != b.pre {
-                            std::result::Result::Err(PackageResolverError::IncompatibleVersions(
-                                id.name().clone(),
-                                Some(a.clone()),
-                                Some(b.clone()),
-                            ))
-                        } else {
-                            std::result::Result::Ok(false)
+                        match a.patch.cmp(&b.patch) {
+                            std::cmp::Ordering::Less => {
+                                a.patch = b.patch;
+                                std::result::Result::Ok(true)
+                            },
+                            std::cmp::Ordering::Equal => match a.pre.cmp(&b.pre) {
+                                std::cmp::Ordering::Less => {
+                                    a.pre = b.pre.clone();
+                                    std::result::Result::Ok(true)
+                                },
+                                std::cmp::Ordering::Equal => if a.build < b.build {
+                                    a.build = b.build.clone();
+                                    std::result::Result::Ok(true)
+                                }
+                                else {
+                                    std::result::Result::Ok(false)
+                                },
+                                std::cmp::Ordering::Greater => std::result::Result::Ok(false),
+                            },
+                            std::cmp::Ordering::Greater => std::result::Result::Ok(false)
                         }
                     } else {
                         std::result::Result::Err(PackageResolverError::IncompatibleVersions(
