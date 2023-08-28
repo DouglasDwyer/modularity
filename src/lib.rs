@@ -463,22 +463,23 @@ impl PackageResolver {
                             std::cmp::Ordering::Less => {
                                 a.patch = b.patch;
                                 std::result::Result::Ok(true)
-                            },
+                            }
                             std::cmp::Ordering::Equal => match a.pre.cmp(&b.pre) {
                                 std::cmp::Ordering::Less => {
                                     a.pre = b.pre.clone();
                                     std::result::Result::Ok(true)
-                                },
-                                std::cmp::Ordering::Equal => if a.build < b.build {
-                                    a.build = b.build.clone();
-                                    std::result::Result::Ok(true)
                                 }
-                                else {
-                                    std::result::Result::Ok(false)
-                                },
+                                std::cmp::Ordering::Equal => {
+                                    if a.build < b.build {
+                                        a.build = b.build.clone();
+                                        std::result::Result::Ok(true)
+                                    } else {
+                                        std::result::Result::Ok(false)
+                                    }
+                                }
                                 std::cmp::Ordering::Greater => std::result::Result::Ok(false),
                             },
-                            std::cmp::Ordering::Greater => std::result::Result::Ok(false)
+                            std::cmp::Ordering::Greater => std::result::Result::Ok(false),
                         }
                     } else {
                         std::result::Result::Err(PackageResolverError::IncompatibleVersions(
@@ -495,7 +496,12 @@ impl PackageResolver {
 
 impl Clone for PackageResolver {
     fn clone(&self) -> Self {
-        Self::new(self.top_level_packages.iter().map(|(k, v)| PackageIdentifier::new(k.clone(), v.clone())), self.linker.clone())
+        Self::new(
+            self.top_level_packages
+                .iter()
+                .map(|(k, v)| PackageIdentifier::new(k.clone(), v.clone())),
+            self.linker.clone(),
+        )
     }
 }
 
