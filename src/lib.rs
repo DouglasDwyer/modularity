@@ -39,7 +39,7 @@
 //!                 .unwrap();
 //!
 //!             // Apply the transition to the package context
-//!             transition.apply(&mut store, &mut ctx);
+//!             transition.apply(&mut store);
 //!
 //!             println!("Loaded packages are {:?}", ctx.packages().collect::<Vec<_>>());
 //!         }
@@ -534,6 +534,7 @@ impl PackageContextImage {
     fn as_transition<'a>(&'a self, ctx: &'a PackageContext) -> PackageContextTransitionBuilder<'a> {
         let mut transition = PackageContextTransitionBuilder {
             state: ctx.state,
+            context: ctx,
             image: self,
             to_load: Vec::with_capacity(self.0.packages.len()),
             to_unload: Vec::with_capacity(ctx.packages.len()),
@@ -654,6 +655,8 @@ struct PackageContextImageInner {
 pub struct PackageContextTransitionBuilder<'a> {
     /// The original state of the context.
     state: u64,
+    /// The context against which to build.
+    context: &'a PackageContext,
     /// The new image.
     image: &'a PackageContextImage,
     /// The list of packages to load, along with load options.
@@ -688,10 +691,9 @@ impl<'a> PackageContextTransitionBuilder<'a> {
     /// Instantiates and links any new components to produce a final [`PackageContextTransition`].
     pub fn build(
         self,
-        store: impl AsContextMut,
-        ctx: &PackageContext,
+        store: impl AsContextMut
     ) -> Result<PackageContextTransition> {
-        ctx.create_next_state(store, self)
+        self.context.create_next_state(store, self)
     }
 }
 

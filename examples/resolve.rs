@@ -44,7 +44,7 @@ pub fn main() {
             Ok(x) => {
                 let mut ctx = PackageContext::new();
                 let transition = PackageContextTransitionBuilder::new(&x, &ctx)
-                    .build(&mut store, &ctx)
+                    .build(&mut store)
                     .unwrap();
                 assert!(
                     transition.apply(&mut store, &mut ctx).is_empty(),

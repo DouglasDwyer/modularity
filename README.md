@@ -40,7 +40,7 @@ while let Some(r) = take(&mut resolver) {
                 .unwrap();
 
             // Apply the transition to the package context
-            transition.apply(&mut store, &mut ctx);
+            transition.apply(&mut store);
 
             println!("Loaded packages are {:?}", ctx.packages().collect::<Vec<_>>());
         }
