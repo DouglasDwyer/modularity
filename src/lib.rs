@@ -689,10 +689,7 @@ impl<'a> PackageContextTransitionBuilder<'a> {
     }
 
     /// Instantiates and links any new components to produce a final [`PackageContextTransition`].
-    pub fn build(
-        self,
-        store: impl AsContextMut
-    ) -> Result<PackageContextTransition> {
+    pub fn build(self, store: impl AsContextMut) -> Result<PackageContextTransition> {
         self.context.create_next_state(store, self)
     }
 }
