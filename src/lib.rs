@@ -310,13 +310,22 @@ impl PackageResolver {
                     self.graph.insert(
                         next.name().clone(),
                         x.imports().instances().filter_map(|(x, _)| {
-                            if let Some(host) = self.linker_packages.1.get(UnversionedInterface::ref_cast(x)) {
-                                if !PartialVersionRef(x.package().version()).matches(&PartialVersionRef(host.0.package().version())) {
-                                    mismatch_err = Err(PackageResolverError::IncompatibleVersions(x.package().name().clone(), x.package().version().cloned(), host.0.package().version().cloned()));
+                            if let Some(host) = self
+                                .linker_packages
+                                .1
+                                .get(UnversionedInterface::ref_cast(x))
+                            {
+                                if !PartialVersionRef(x.package().version())
+                                    .matches(&PartialVersionRef(host.0.package().version()))
+                                {
+                                    mismatch_err = Err(PackageResolverError::IncompatibleVersions(
+                                        x.package().name().clone(),
+                                        x.package().version().cloned(),
+                                        host.0.package().version().cloned(),
+                                    ));
                                 }
                                 None
-                            }
-                            else {
+                            } else {
                                 self.to_resolve.push(x.package().clone());
                                 Some(x.package().name().clone())
                             }
@@ -381,7 +390,7 @@ impl PackageResolver {
                 self.graph.len(),
                 FxBuildHasher::default(),
             ),
-            linker_packages: self.linker_packages.clone()
+            linker_packages: self.linker_packages.clone(),
         };
 
         self.load_packages_and_dependencies(&mut res)?;
@@ -524,9 +533,15 @@ impl PackageResolver {
 
     /// Collects the set of host packages from the input linker.
     fn host_package_set(linker: &Linker) -> FxHashSet<UnversionedInterface> {
-        let mut result = FxHashSet::<UnversionedInterface>::with_capacity_and_hasher(linker.instances().len(), Default::default());
+        let mut result = FxHashSet::<UnversionedInterface>::with_capacity_and_hasher(
+            linker.instances().len(),
+            Default::default(),
+        );
         for (id, _) in linker.instances() {
-            assert!(result.insert(UnversionedInterface(id.clone())), "Multiple versions of the same host interface declared.");
+            assert!(
+                result.insert(UnversionedInterface(id.clone())),
+                "Multiple versions of the same host interface declared."
+            );
         }
         result
     }
@@ -541,11 +556,13 @@ impl std::fmt::Debug for PackageResolver {
 /// Copies one linker instance to another.
 fn copy_instance(old: &LinkerInstance, new: &mut LinkerInstance) {
     for (name, func) in old.funcs() {
-        new.define_func(name, func).expect("Could not copy function between instances.")
+        new.define_func(name, func)
+            .expect("Could not copy function between instances.")
     }
-    
+
     for (name, resource) in old.resources() {
-        new.define_resource(name, resource).expect("Could not copy resource between instances.")
+        new.define_resource(name, resource)
+            .expect("Could not copy resource between instances.")
     }
 }
 
@@ -1018,7 +1035,12 @@ impl PackageContext {
 
         for step in &mut transition.to_load {
             to_load.push(step.resolved.id.clone());
-            Self::load_new(&mut next_packages, ctx.as_context_mut(), step, &transition.image.0.linker_packages.1)?;
+            Self::load_new(
+                &mut next_packages,
+                ctx.as_context_mut(),
+                step,
+                &transition.image.0.linker_packages.1,
+            )?;
         }
 
         Ok(PackageContextTransition {
@@ -1035,7 +1057,7 @@ impl PackageContext {
         packages: &mut FxHashMap<PackageName, ResolvedInstance>,
         ctx: impl AsContextMut,
         step: &mut PackageBuildOptions,
-        linker_versions: &FxHashSet<UnversionedInterface>
+        linker_versions: &FxHashSet<UnversionedInterface>,
     ) -> Result<()> {
         let linker = step.linker.to_mut();
         let mut tmp_linker = Linker::default();
@@ -1043,12 +1065,23 @@ impl PackageContext {
         for (interface, _) in step.resolved.component.imports().instances() {
             if let Some(host) = linker_versions.get(UnversionedInterface::ref_cast(interface)) {
                 if host.0.package().version() != interface.package().version() {
-                    let tmp_instance = tmp_linker.define_instance(interface.clone()).expect("Could not define temporary instance.");
-                    copy_instance(linker.instance(&host.0).context("Could not find host interface.")?, tmp_instance);
-                    copy_instance(tmp_instance, linker.define_instance(interface.clone()).context("Conflicting host interface versions.")?);
+                    let tmp_instance = tmp_linker
+                        .define_instance(interface.clone())
+                        .expect("Could not define temporary instance.");
+                    copy_instance(
+                        linker
+                            .instance(&host.0)
+                            .context("Could not find host interface.")?,
+                        tmp_instance,
+                    );
+                    copy_instance(
+                        tmp_instance,
+                        linker
+                            .define_instance(interface.clone())
+                            .context("Conflicting host interface versions.")?,
+                    );
                 }
-            }
-            else {
+            } else {
                 let exporting_package = &packages[interface.package().name()];
                 let name = InterfaceIdentifier::new(
                     PackageIdentifier::new(
