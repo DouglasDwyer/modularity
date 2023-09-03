@@ -63,8 +63,10 @@ use anyhow::*;
 use bitvec::access::*;
 use bitvec::prelude::*;
 use fxhash::*;
+use ref_cast::*;
 use semver::*;
 use std::borrow::*;
+use std::hash::*;
 use std::mem::*;
 use std::ops::*;
 use std::sync::atomic::*;
@@ -143,6 +145,26 @@ enum PackageResolutionState {
     InGraph(Component),
 }
 
+/// An interface identifier which is equal across all versions.
+#[derive(Clone, Debug, RefCast)]
+#[repr(transparent)]
+struct UnversionedInterface(InterfaceIdentifier);
+
+impl PartialEq for UnversionedInterface {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.name() == other.0.name() && self.0.package().name() == other.0.package().name()
+    }
+}
+
+impl Eq for UnversionedInterface {}
+
+impl Hash for UnversionedInterface {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.name().hash(state);
+        self.0.package().name().hash(state);
+    }
+}
+
 /// Denotes a package that must be supplied for resolution to continue.
 #[derive(Debug)]
 pub struct UnresolvedPackage {
@@ -216,14 +238,14 @@ pub struct PackageResolver {
     unresolved_packages: Vec<UnresolvedPackage>,
     /// The set of packages that are currently undergoing resolution.
     to_resolve: Vec<PackageIdentifier>,
-    /// The linker that will be used to resolve host imports.
-    linker: Linker,
+    /// The linker that will be used to resolve host imports, and a mapping from interface name to version.
+    linker_packages: Arc<(Linker, FxHashSet<UnversionedInterface>)>,
 }
 
 impl PackageResolver {
     /// Creates a new package resolver for the requested set of top-level packages and host linker.
     /// Panics if the same package appears in the list multiple times.
-    pub fn new(ids: impl IntoIterator<Item = PackageIdentifier>, linker: Linker) -> Self {
+    pub fn new(ids: impl IntoIterator<Item = PackageIdentifier>, linker: &Linker) -> Self {
         let mut top_level_packages = FxHashMap::default();
 
         for id in ids {
@@ -249,7 +271,7 @@ impl PackageResolver {
             top_level_packages,
             unresolved_packages: Vec::with_capacity(to_resolve.len()),
             to_resolve,
-            linker,
+            linker_packages: Arc::new((linker.clone(), Self::host_package_set(linker))),
         }
     }
 
@@ -284,16 +306,24 @@ impl PackageResolver {
                         }
                     }
                 } else if let PackageResolutionState::Resolved(x) = &mut info.state {
+                    let mut mismatch_err = std::result::Result::Ok(());
                     self.graph.insert(
                         next.name().clone(),
                         x.imports().instances().filter_map(|(x, _)| {
-                            self.linker.instance(x).is_none().then(|| {
+                            if let Some(host) = self.linker_packages.1.get(UnversionedInterface::ref_cast(x)) {
+                                if !PartialVersionRef(x.package().version()).matches(&PartialVersionRef(host.0.package().version())) {
+                                    mismatch_err = Err(PackageResolverError::IncompatibleVersions(x.package().name().clone(), x.package().version().cloned(), host.0.package().version().cloned()));
+                                }
+                                None
+                            }
+                            else {
                                 self.to_resolve.push(x.package().clone());
-                                x.package().name().clone()
-                            })
+                                Some(x.package().name().clone())
+                            }
                         }),
                     );
 
+                    mismatch_err?;
                     info.state = PackageResolutionState::InGraph(x.clone());
                 }
             } else {
@@ -351,12 +381,11 @@ impl PackageResolver {
                 self.graph.len(),
                 FxBuildHasher::default(),
             ),
-            linker: Linker::default(),
+            linker_packages: self.linker_packages.clone()
         };
 
         self.load_packages_and_dependencies(&mut res)?;
         self.compute_inverse_dependencies(&mut res);
-        res.linker = self.linker;
 
         std::result::Result::Ok(PackageContextImage(Arc::new(res)))
     }
@@ -492,16 +521,14 @@ impl PackageResolver {
             }
         }
     }
-}
 
-impl Clone for PackageResolver {
-    fn clone(&self) -> Self {
-        Self::new(
-            self.top_level_packages
-                .iter()
-                .map(|(k, v)| PackageIdentifier::new(k.clone(), v.clone())),
-            self.linker.clone(),
-        )
+    /// Collects the set of host packages from the input linker.
+    fn host_package_set(linker: &Linker) -> FxHashSet<UnversionedInterface> {
+        let mut result = FxHashSet::<UnversionedInterface>::with_capacity_and_hasher(linker.instances().len(), Default::default());
+        for (id, _) in linker.instances() {
+            assert!(result.insert(UnversionedInterface(id.clone())), "Multiple versions of the same host interface declared.");
+        }
+        result
     }
 }
 
@@ -511,8 +538,19 @@ impl std::fmt::Debug for PackageResolver {
     }
 }
 
+/// Copies one linker instance to another.
+fn copy_instance(old: &LinkerInstance, new: &mut LinkerInstance) {
+    for (name, func) in old.funcs() {
+        new.define_func(name, func).expect("Could not copy function between instances.")
+    }
+    
+    for (name, resource) in old.resources() {
+        new.define_resource(name, resource).expect("Could not copy resource between instances.")
+    }
+}
+
 /// Describes an issue with package dependency resolution.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum PackageResolverError {
     /// Two or more packages were mutually dependent on each other.
     CyclicPackageDependency(),
@@ -556,7 +594,7 @@ impl PackageContextImage {
                         .push(ctx.image.0.packages[*old_i as usize].id.clone());
                     transition.to_load.push(PackageBuildOptions {
                         resolved: pkg,
-                        linker: Cow::Borrowed(&self.0.linker),
+                        linker: Cow::Borrowed(&self.0.linker_packages.0),
                     });
                 } else {
                     old_touched.set(*old_i as usize, true);
@@ -564,7 +602,7 @@ impl PackageContextImage {
             } else {
                 transition.to_load.push(PackageBuildOptions {
                     resolved: pkg,
-                    linker: Cow::Borrowed(&self.0.linker),
+                    linker: Cow::Borrowed(&self.0.linker_packages.0),
                 });
             }
         }
@@ -645,8 +683,8 @@ struct PackageContextImageInner {
     pub top_level_packages: BitVec,
     /// A mapping from package name to index in the resolved list.
     pub package_map: FxHashMap<PackageName, u16>,
-    /// The host linker.
-    pub linker: Linker,
+    /// The linker that will be used to resolve host imports, and a mapping from interface name to version.
+    linker_packages: Arc<(Linker, FxHashSet<UnversionedInterface>)>,
 }
 
 /// Facilitates the creation of new [`PackageContextTransition`]s, which switch the [`PackageContextImage`]
@@ -980,7 +1018,7 @@ impl PackageContext {
 
         for step in &mut transition.to_load {
             to_load.push(step.resolved.id.clone());
-            Self::load_new(&mut next_packages, ctx.as_context_mut(), step)?;
+            Self::load_new(&mut next_packages, ctx.as_context_mut(), step, &transition.image.0.linker_packages.1)?;
         }
 
         Ok(PackageContextTransition {
@@ -997,25 +1035,36 @@ impl PackageContext {
         packages: &mut FxHashMap<PackageName, ResolvedInstance>,
         ctx: impl AsContextMut,
         step: &mut PackageBuildOptions,
+        linker_versions: &FxHashSet<UnversionedInterface>
     ) -> Result<()> {
         let linker = step.linker.to_mut();
+        let mut tmp_linker = Linker::default();
 
         for (interface, _) in step.resolved.component.imports().instances() {
-            let exporting_package = &packages[interface.package().name()];
-            let name = InterfaceIdentifier::new(
-                PackageIdentifier::new(
-                    interface.package().name().clone(),
-                    exporting_package.version.clone(),
-                ),
-                interface.name(),
-            );
-            if let Some(exported) = exporting_package.instance.exports().instance(&name) {
-                Self::fill_linker(linker, interface, exported)?;
-            } else {
-                bail!(
-                    "Package {} required missing interface {interface}",
-                    step.resolved.id
+            if let Some(host) = linker_versions.get(UnversionedInterface::ref_cast(interface)) {
+                if host.0.package().version() != interface.package().version() {
+                    let tmp_instance = tmp_linker.define_instance(interface.clone()).expect("Could not define temporary instance.");
+                    copy_instance(linker.instance(&host.0).context("Could not find host interface.")?, tmp_instance);
+                    copy_instance(tmp_instance, linker.define_instance(interface.clone()).context("Conflicting host interface versions.")?);
+                }
+            }
+            else {
+                let exporting_package = &packages[interface.package().name()];
+                let name = InterfaceIdentifier::new(
+                    PackageIdentifier::new(
+                        interface.package().name().clone(),
+                        exporting_package.version.clone(),
+                    ),
+                    interface.name(),
                 );
+                if let Some(exported) = exporting_package.instance.exports().instance(&name) {
+                    Self::fill_linker(linker, interface, exported)?;
+                } else {
+                    bail!(
+                        "Package {} required missing interface {interface}",
+                        step.resolved.id
+                    );
+                }
             }
         }
 
