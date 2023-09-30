@@ -32,7 +32,7 @@ pub fn main() {
     .unwrap();
     let mut resolver = Some(PackageResolver::new(
         [package_names[3].clone(), package_names[4].clone()],
-        Linker::default(),
+        &Linker::default(),
     ));
     let packages = package_names
         .into_iter()

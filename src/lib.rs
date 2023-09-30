@@ -113,38 +113,6 @@ impl<'a> Ord for PartialVersionRef<'a> {
     }
 }
 
-/// A package that consists of an identifier and parsed binary.
-#[derive(Clone, Debug)]
-struct ResolvedPackage {
-    /// The ID of the package.
-    pub id: PackageIdentifier,
-    /// The parsed component.
-    pub component: Component,
-}
-
-/// Stores transient information about a package during version resolution.
-#[derive(Clone, Debug)]
-struct PackageResolutionInfo {
-    /// The maximum version of the package loaded so far.
-    pub version: Option<Version>,
-    /// Whether any candidate packages must match in version exactly.
-    pub exact: bool,
-    /// Whether this package is resolved and in the component graph.
-    pub state: PackageResolutionState,
-}
-
-/// Denotes a package's current standing in the component graph.
-#[derive(Clone, Debug)]
-enum PackageResolutionState {
-    /// The package has a pending resolution request with the given index.
-    Unresolved(u16),
-    /// The package has been resolved to a component.
-    Resolved(Component),
-    /// The package has been resolved to a component, and a vertex representing
-    /// it has been added to the graph.
-    InGraph(Component),
-}
-
 /// An interface identifier which is equal across all versions.
 #[derive(Clone, Debug, RefCast)]
 #[repr(transparent)]
@@ -165,11 +133,53 @@ impl Hash for UnversionedInterface {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SelectedPackage {
+    pub name: PackageName,
+    pub version: Option<u64>
+}
+
+impl From<&PackageIdentifier> for SelectedPackage {
+    fn from(value: &PackageIdentifier) -> Self {
+        Self { name: value.name().clone(), version: value.version().map(|x| x.major) }
+    }
+}
+
+/// A package that consists of an identifier and parsed binary.
+#[derive(Clone, Debug)]
+struct ResolvedPackage {
+    /// The ID of the package.
+    pub id: PackageIdentifier,
+    /// The parsed component.
+    pub component: Component,
+}
+
+/// Stores transient information about a package during version resolution.
+#[derive(Clone, Debug)]
+struct PackageResolutionInfo {
+    /// The maximum version of the package loaded so far.
+    pub version: Option<Version>,
+    /// Whether this package is resolved and in the component graph.
+    pub state: PackageResolutionState,
+    /// Whether this is a top-level package.
+    pub top_level_package: bool,
+}
+
+/// Denotes a package's current standing in the component graph.
+#[derive(Clone, Debug)]
+enum PackageResolutionState {
+    /// The package has a pending resolution request with the given index.
+    Unresolved(u16),
+    /// The package has been resolved to a component.
+    Resolved(Component),
+    /// The package has been resolved to a component, and a vertex representing
+    /// it has been added to the graph.
+    InGraph(Component),
+}
+
 /// Denotes a package that must be supplied for resolution to continue.
 #[derive(Debug)]
 pub struct UnresolvedPackage {
-    /// Whether any candidate packages must match the version exactly.
-    exact: bool,
     /// The ID of the package.
     id: PackageIdentifier,
     /// The selected component, if any.
@@ -180,13 +190,6 @@ impl UnresolvedPackage {
     /// Gets the requested ID of this package.
     pub fn id(&self) -> &PackageIdentifier {
         &self.id
-    }
-
-    /// Whether the resolved component must match in version exactly. Otherwise, any version
-    /// that is greater only in patch (satisfying the `semver` equation `actual = ^requested`)
-    /// is allowed.
-    pub fn exact(&self) -> bool {
-        self.exact
     }
 
     /// Whether a component has been provided for this package.
@@ -201,23 +204,14 @@ impl UnresolvedPackage {
             self.id.name() == id.name(),
             "Package names were not the same."
         );
-        if self.exact {
-            assert!(
-                self.id.version() == id.version(),
-                "Package {} versions did not match exactly: expected {:?} but got {:?}",
-                self.id.name(),
-                self.id.version(),
-                id.version()
-            );
-        } else {
-            assert!(
-                PartialVersionRef(self.id.version()).matches(&PartialVersionRef(id.version())),
-                "Package {} versions did not match: expected {:?} but got {:?}",
-                self.id.name(),
-                self.id.version(),
-                id.version()
-            );
-        }
+        
+        assert!(
+            PartialVersionRef(self.id.version()).matches(&PartialVersionRef(id.version())),
+            "Package {} versions did not match: expected {:?} but got {:?}",
+            self.id.name(),
+            self.id.version(),
+            id.version()
+        );
 
         assert!(
             replace(&mut self.selected, Some((id, component))).is_none(),
@@ -229,11 +223,11 @@ impl UnresolvedPackage {
 /// Builds a package dependency graph which can be converted to a [`PackageContextImage`].
 pub struct PackageResolver {
     /// The topological graph.
-    graph: TopoSort<PackageName>,
+    graph: TopoSort<SelectedPackage>,
     /// The current versions and binaries of loaded packages.
-    chosen_packages: FxHashMap<PackageName, PackageResolutionInfo>,
+    chosen_packages: FxHashMap<SelectedPackage, PackageResolutionInfo>,
     /// The top-level packages from which all dependencies originate.
-    top_level_packages: FxHashMap<PackageName, Option<Version>>,
+    top_level_packages: FxHashMap<SelectedPackage, Option<Version>>,
     /// The list of packages that the user has yet to resolve.
     unresolved_packages: Vec<UnresolvedPackage>,
     /// The set of packages that are currently undergoing resolution.
@@ -247,19 +241,17 @@ impl PackageResolver {
     /// Panics if the same package appears in the list multiple times.
     pub fn new(ids: impl IntoIterator<Item = PackageIdentifier>, linker: &Linker) -> Self {
         let mut top_level_packages = FxHashMap::default();
+        let mut to_resolve = Vec::with_capacity(top_level_packages.len());
 
         for id in ids {
             assert!(
                 top_level_packages
-                    .insert(id.name().clone(), id.version().cloned())
+                    .insert(SelectedPackage::from(&id), id.version().cloned())
                     .is_none(),
                 "Duplicate top-level packages."
             );
-        }
 
-        let mut to_resolve = Vec::with_capacity(top_level_packages.len());
-        for (name, version) in &top_level_packages {
-            to_resolve.push(PackageIdentifier::new(name.clone(), version.clone()));
+            to_resolve.push(id);
         }
 
         Self {
@@ -286,8 +278,9 @@ impl PackageResolver {
     pub fn resolve(mut self) -> Result<PackageContextImage, PackageResolverError> {
         self.clear_unresolved();
         while let Some(next) = self.to_resolve.pop() {
-            if let Some(info) = self.chosen_packages.get_mut(next.name()) {
-                if Self::upgrade(&next, &mut info.version, info.exact)? {
+            let selected_package = SelectedPackage::from(&next);
+            if let Some(info) = self.chosen_packages.get_mut(&selected_package) {
+                if Self::upgrade(&next, &mut info.version)? {
                     match info.state {
                         PackageResolutionState::Unresolved(idx) => {
                             self.unresolved_packages[idx as usize].id = next;
@@ -296,7 +289,6 @@ impl PackageResolver {
                             let index = self.unresolved_packages.len() as u16;
                             info.state = PackageResolutionState::Unresolved(index);
                             self.unresolved_packages.push(UnresolvedPackage {
-                                exact: self.top_level_packages.contains_key(next.name()),
                                 id: next,
                                 selected: None,
                             });
@@ -308,7 +300,7 @@ impl PackageResolver {
                 } else if let PackageResolutionState::Resolved(x) = &mut info.state {
                     let mut mismatch_err = std::result::Result::Ok(());
                     self.graph.insert(
-                        next.name().clone(),
+                        selected_package,
                         x.imports().instances().filter_map(|(x, _)| {
                             if let Some(host) = self
                                 .linker_packages
@@ -327,7 +319,7 @@ impl PackageResolver {
                                 None
                             } else {
                                 self.to_resolve.push(x.package().clone());
-                                Some(x.package().name().clone())
+                                Some(x.package().into())
                             }
                         }),
                     );
@@ -337,16 +329,16 @@ impl PackageResolver {
                 }
             } else {
                 let index = self.unresolved_packages.len() as u16;
+                let top_level_package = self.top_level_packages.contains_key(&selected_package);
                 self.chosen_packages.insert(
-                    next.name().clone(),
+                    selected_package,
                     PackageResolutionInfo {
                         version: next.version().cloned(),
-                        exact: self.top_level_packages.contains_key(next.name()),
                         state: PackageResolutionState::Unresolved(index),
+                        top_level_package,
                     },
                 );
                 self.unresolved_packages.push(UnresolvedPackage {
-                    exact: self.top_level_packages.contains_key(next.name()),
                     id: next,
                     selected: None,
                 });
@@ -369,7 +361,7 @@ impl PackageResolver {
         self.to_resolve.extend(
             self.top_level_packages
                 .iter()
-                .map(|(a, b)| PackageIdentifier::new(a.clone(), b.clone())),
+                .map(|(a, b)| PackageIdentifier::new(a.name.clone(), b.clone())),
         );
 
         for pkg in self.chosen_packages.values_mut() {
@@ -411,13 +403,13 @@ impl PackageResolver {
             if let PackageResolutionState::InGraph(x) = &chosen.state {
                 let idx = res.packages.len();
 
-                if chosen.exact {
+                if chosen.top_level_package {
                     res.top_level_packages.set(idx, true);
                 }
 
                 res.package_map.insert(name.clone(), idx as u16);
                 res.packages.push(ResolvedPackage {
-                    id: PackageIdentifier::new(name.clone(), chosen.version.clone()),
+                    id: PackageIdentifier::new(name.name.clone(), chosen.version.clone()),
                     component: x.clone(),
                 });
 
@@ -439,8 +431,8 @@ impl PackageResolver {
         for i in (0..res.packages.len()).rev() {
             let mut edit = res.transitive_dependents.edit(i);
             edit.set(i, true);
-            let name = res.packages[i].id.name();
-            for i in &self.graph[name] {
+            let name = SelectedPackage::from(&res.packages[i].id);
+            for i in &self.graph[&name] {
                 edit.or_into(res.package_map[i] as usize);
             }
         }
@@ -453,7 +445,7 @@ impl PackageResolver {
             if let Some((id, pkg)) = &resolved.selected {
                 let info = self
                     .chosen_packages
-                    .get_mut(id.name())
+                    .get_mut(&id.into())
                     .expect("Package was not in map.");
                 info.version = id.version().cloned();
                 info.state = PackageResolutionState::Resolved(pkg.clone());
@@ -461,7 +453,7 @@ impl PackageResolver {
                 false
             } else {
                 self.chosen_packages
-                    .get_mut(resolved.id.name())
+                    .get_mut(&SelectedPackage::from(&resolved.id))
                     .expect("Package was not in map.")
                     .state = PackageResolutionState::Unresolved(i);
                 i += 1;
@@ -475,57 +467,44 @@ impl PackageResolver {
     fn upgrade(
         id: &PackageIdentifier,
         mut current: &mut Option<Version>,
-        exact: bool,
     ) -> Result<bool, PackageResolverError> {
-        if exact {
-            if id.version() == current.as_ref() {
-                std::result::Result::Ok(false)
-            } else {
-                std::result::Result::Err(PackageResolverError::IncompatibleVersions(
-                    id.name().clone(),
-                    current.clone(),
-                    id.version().cloned(),
-                ))
+        match (&mut current, id.version()) {
+            (None, None) => std::result::Result::Ok(false),
+            (None, Some(x)) => {
+                *current = Some(x.clone());
+                std::result::Result::Ok(true)
             }
-        } else {
-            match (&mut current, id.version()) {
-                (None, None) => std::result::Result::Ok(false),
-                (None, Some(x)) => {
-                    *current = Some(x.clone());
-                    std::result::Result::Ok(true)
-                }
-                (Some(_), None) => std::result::Result::Ok(false),
-                (Some(a), Some(b)) => {
-                    if a.major == b.major && a.minor == b.minor {
-                        match a.patch.cmp(&b.patch) {
+            (Some(_), None) => std::result::Result::Ok(false),
+            (Some(a), Some(b)) => {
+                if a.major == b.major && a.minor == b.minor {
+                    match a.patch.cmp(&b.patch) {
+                        std::cmp::Ordering::Less => {
+                            a.patch = b.patch;
+                            std::result::Result::Ok(true)
+                        }
+                        std::cmp::Ordering::Equal => match a.pre.cmp(&b.pre) {
                             std::cmp::Ordering::Less => {
-                                a.patch = b.patch;
+                                a.pre = b.pre.clone();
                                 std::result::Result::Ok(true)
                             }
-                            std::cmp::Ordering::Equal => match a.pre.cmp(&b.pre) {
-                                std::cmp::Ordering::Less => {
-                                    a.pre = b.pre.clone();
+                            std::cmp::Ordering::Equal => {
+                                if a.build < b.build {
+                                    a.build = b.build.clone();
                                     std::result::Result::Ok(true)
+                                } else {
+                                    std::result::Result::Ok(false)
                                 }
-                                std::cmp::Ordering::Equal => {
-                                    if a.build < b.build {
-                                        a.build = b.build.clone();
-                                        std::result::Result::Ok(true)
-                                    } else {
-                                        std::result::Result::Ok(false)
-                                    }
-                                }
-                                std::cmp::Ordering::Greater => std::result::Result::Ok(false),
-                            },
+                            }
                             std::cmp::Ordering::Greater => std::result::Result::Ok(false),
-                        }
-                    } else {
-                        std::result::Result::Err(PackageResolverError::IncompatibleVersions(
-                            id.name().clone(),
-                            Some(a.clone()),
-                            Some(b.clone()),
-                        ))
+                        },
+                        std::cmp::Ordering::Greater => std::result::Result::Ok(false),
                     }
+                } else {
+                    std::result::Result::Err(PackageResolverError::IncompatibleVersions(
+                        id.name().clone(),
+                        Some(a.clone()),
+                        Some(b.clone()),
+                    ))
                 }
             }
         }
@@ -600,7 +579,7 @@ impl PackageContextImage {
 
         for i in 0..self.0.packages.len() {
             let pkg = &self.0.packages[i];
-            if let Some(old_i) = ctx.image.0.package_map.get(pkg.id.name()) {
+            if let Some(old_i) = ctx.image.0.package_map.get(&SelectedPackage::from(&pkg.id)) {
                 if pkg.id != ctx.image.0.packages[*old_i as usize].id {
                     old_dead[..] |= ctx.image.0.transitive_dependents.get(*old_i as usize);
                 }
@@ -642,7 +621,7 @@ impl PackageContextImage {
     ) -> impl 'a + Iterator<Item = &'a PackageIdentifier> {
         self.0
             .package_map
-            .get(id.name())
+            .get(&id.into())
             .and_then(|x| (&self.0.packages[*x as usize].id == id).then_some(x))
             .into_iter()
             .flat_map(|x| self.0.transitive_dependencies.get(*x as usize).iter_ones())
@@ -656,7 +635,7 @@ impl PackageContextImage {
     ) -> impl 'a + Iterator<Item = &'a PackageIdentifier> {
         self.0
             .package_map
-            .get(id.name())
+            .get(&id.into())
             .and_then(|x| (&self.0.packages[*x as usize].id == id).then_some(x))
             .into_iter()
             .flat_map(|x| self.0.transitive_dependents.get(*x as usize).iter_ones())
@@ -670,7 +649,7 @@ impl PackageContextImage {
     ) -> impl 'a + Iterator<Item = &'a PackageIdentifier> {
         let mut tmp = self.0.top_level_packages.clone();
 
-        if let Some(pkg) = self.0.package_map.get(id.name()) {
+        if let Some(pkg) = self.0.package_map.get(&id.into()) {
             if &self.0.packages[*pkg as usize].id == id {
                 tmp[..] &= self.0.transitive_dependents.get(*pkg as usize);
             } else {
@@ -699,7 +678,7 @@ struct PackageContextImageInner {
     /// The subset of packages that are top-level.
     pub top_level_packages: BitVec,
     /// A mapping from package name to index in the resolved list.
-    pub package_map: FxHashMap<PackageName, u16>,
+    pub package_map: FxHashMap<SelectedPackage, u16>,
     /// The linker that will be used to resolve host imports, and a mapping from interface name to version.
     linker_packages: Arc<(Linker, FxHashSet<UnversionedInterface>)>,
 }

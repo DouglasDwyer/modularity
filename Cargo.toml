@@ -10,14 +10,14 @@ WASM component loader, linker, and manager.
 """
 
 [dependencies]
-anyhow = "1.0.75"
-bitvec = "1.0.1"
-fxhash = "0.2.1"
-ref-cast = "1.0.20"
-semver = "1.0.18"
-topo_sort = "0.4.0"
-wasm_component_layer = "0.1.6"
-wasm_runtime_layer = "0.1.3"
+anyhow = { version = "1.0.75", default-features = false }
+bitvec = { version = "1.0.1", default-features = false, features = [ "alloc" ] }
+fxhash = { version = "0.2.1", default-features = false }
+ref-cast = { version = "1.0.20", default-features = false }
+semver = { version = "1.0.18", default-features = false }
+topo_sort = { version = "0.4.0", default-features = false }
+wasm_component_layer = { version = "0.1.9", default-features = false }
+wasm_runtime_layer = { version = "0.1.4", default-features = false }
 
 [dev-dependencies]
 wasmi = "0.31.0"
