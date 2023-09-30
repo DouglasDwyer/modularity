@@ -120,7 +120,9 @@ struct SelectedInterface(InterfaceIdentifier);
 
 impl PartialEq for SelectedInterface {
     fn eq(&self, other: &Self) -> bool {
-        self.0.name() == other.0.name() && SelectedPackage::ref_cast(self.0.package()) == SelectedPackage::ref_cast(other.0.package())
+        self.0.name() == other.0.name()
+            && SelectedPackage::ref_cast(self.0.package())
+                == SelectedPackage::ref_cast(other.0.package())
     }
 }
 
@@ -140,12 +142,13 @@ struct SelectedPackage(PackageIdentifier);
 
 impl PartialEq for SelectedPackage {
     fn eq(&self, other: &Self) -> bool {
-        self.0.name() == other.0.name() && match (self.0.version(), other.0.version()) {
-            (None, None) => true,
-            (None, Some(_)) => false,
-            (Some(_), None) => false,
-            (Some(a), Some(b)) => a.major == b.major && a.minor == b.minor,
-        }
+        self.0.name() == other.0.name()
+            && match (self.0.version(), other.0.version()) {
+                (None, None) => true,
+                (None, Some(_)) => false,
+                (Some(_), None) => false,
+                (Some(a), Some(b)) => a.major == b.major && a.minor == b.minor,
+            }
     }
 }
 
@@ -216,7 +219,7 @@ impl UnresolvedPackage {
             self.id.name() == id.name(),
             "Package names were not the same."
         );
-        
+
         assert!(
             PartialVersionRef(self.id.version()).matches(&PartialVersionRef(id.version())),
             "Package {} versions did not match: expected {:?} but got {:?}",
@@ -281,17 +284,28 @@ impl PackageResolver {
 
     /// Computes the set of top-level package that have the given package as a transitive dependency, including the package itself.
     /// The list may not be exhaustive if not all packages have been loaded.
-    pub fn top_level_dependents<'a>(&'a self, id: &PackageIdentifier) -> impl 'a + Iterator<Item = PackageIdentifier> {
-        let packages = match self.graph.to_vec() { SortResults::Full(x) => x, SortResults::Partial(x) => x };
+    pub fn top_level_dependents<'a>(
+        &'a self,
+        id: &PackageIdentifier,
+    ) -> impl 'a + Iterator<Item = PackageIdentifier> {
+        let packages = match self.graph.to_vec() {
+            SortResults::Full(x) => x,
+            SortResults::Partial(x) => x,
+        };
         let mut discovered = HashSet::with_capacity_and_hasher(packages.len(), Default::default());
-        
-        if self.chosen_packages.get(SelectedPackage::ref_cast(id)).map(|x| id.version() == x.version.as_ref()).unwrap_or_default() {
+
+        if self
+            .chosen_packages
+            .get(SelectedPackage::ref_cast(id))
+            .map(|x| id.version() == x.version.as_ref())
+            .unwrap_or_default()
+        {
             discovered.insert(SelectedPackage(id.clone()));
-            
+
             let mut last_length = usize::MAX;
             while last_length != discovered.len() {
                 last_length = discovered.len();
-    
+
                 for &(pkg, deps) in packages.iter() {
                     if !(discovered.contains(pkg) || discovered.is_disjoint(deps)) {
                         discovered.insert(pkg.clone());
@@ -300,7 +314,19 @@ impl PackageResolver {
             }
         }
 
-        discovered.into_iter().filter(|x| self.top_level_packages.contains_key(x)).map(|x| PackageIdentifier::new(x.0.name().clone(), self.chosen_packages.get(&x).expect("Package not found.").version.clone()))
+        discovered
+            .into_iter()
+            .filter(|x| self.top_level_packages.contains_key(x))
+            .map(|x| {
+                PackageIdentifier::new(
+                    x.0.name().clone(),
+                    self.chosen_packages
+                        .get(&x)
+                        .expect("Package not found.")
+                        .version
+                        .clone(),
+                )
+            })
     }
 
     /// The list of packages that must be provided for resolution to continue.
@@ -488,10 +514,7 @@ impl PackageResolver {
 
     /// Takes the maximum between two dependency versions, returning whether the version
     /// changed in the process.
-    fn upgrade(
-        id: &PackageIdentifier,
-        mut current: &mut Option<Version>,
-    ) -> bool {
+    fn upgrade(id: &PackageIdentifier, mut current: &mut Option<Version>) -> bool {
         match (&mut current, id.version()) {
             (None, None) => false,
             (None, Some(x)) => {
@@ -499,30 +522,28 @@ impl PackageResolver {
                 true
             }
             (Some(_), None) => false,
-            (Some(a), Some(b)) => {
-                match a.patch.cmp(&b.patch) {
+            (Some(a), Some(b)) => match a.patch.cmp(&b.patch) {
+                std::cmp::Ordering::Less => {
+                    a.patch = b.patch;
+                    true
+                }
+                std::cmp::Ordering::Equal => match a.pre.cmp(&b.pre) {
                     std::cmp::Ordering::Less => {
-                        a.patch = b.patch;
+                        a.pre = b.pre.clone();
                         true
                     }
-                    std::cmp::Ordering::Equal => match a.pre.cmp(&b.pre) {
-                        std::cmp::Ordering::Less => {
-                            a.pre = b.pre.clone();
+                    std::cmp::Ordering::Equal => {
+                        if a.build < b.build {
+                            a.build = b.build.clone();
                             true
+                        } else {
+                            false
                         }
-                        std::cmp::Ordering::Equal => {
-                            if a.build < b.build {
-                                a.build = b.build.clone();
-                                true
-                            } else {
-                                false
-                            }
-                        }
-                        std::cmp::Ordering::Greater => false,
-                    },
+                    }
                     std::cmp::Ordering::Greater => false,
-                }
-            }
+                },
+                std::cmp::Ordering::Greater => false,
+            },
         }
     }
 
@@ -592,7 +613,12 @@ impl PackageContextImage {
 
         for i in 0..self.0.packages.len() {
             let pkg = &self.0.packages[i];
-            if let Some(old_i) = ctx.image.0.package_map.get(SelectedPackage::ref_cast(&pkg.id)) {
+            if let Some(old_i) = ctx
+                .image
+                .0
+                .package_map
+                .get(SelectedPackage::ref_cast(&pkg.id))
+            {
                 if pkg.id != ctx.image.0.packages[*old_i as usize].id {
                     old_dead[..] |= ctx.image.0.transitive_dependents.get(*old_i as usize);
                 }
@@ -685,7 +711,8 @@ impl std::fmt::Debug for PackageContextImage {
             .field(
                 "packages",
                 &self
-                    .0.packages
+                    .0
+                    .packages
                     .iter()
                     .map(|x| &x.id)
                     .collect::<SmallVec<[_; DEFAULT_PACKAGE_BUFFER_SIZE]>>(),
@@ -978,10 +1005,14 @@ impl PackageContext {
 
     /// Gets the package with the provided name, if any.
     pub fn package(&self, name: &PackageIdentifier) -> Option<LoadedPackage> {
-        self.packages.get(SelectedPackage::ref_cast(name)).and_then(|x| (name.version() == x.version.as_ref()).then(|| LoadedPackage {
-            name: name.clone(),
-            instance: &x.instance,
-        }))
+        self.packages
+            .get(SelectedPackage::ref_cast(name))
+            .and_then(|x| {
+                (name.version() == x.version.as_ref()).then(|| LoadedPackage {
+                    name: name.clone(),
+                    instance: &x.instance,
+                })
+            })
     }
 
     /// Gets an iterator over all loaded packages.
@@ -1033,7 +1064,9 @@ impl PackageContext {
 
         for to_unload in &transition.to_unload {
             assert!(
-                next_packages.remove(SelectedPackage::ref_cast(to_unload)).is_some(),
+                next_packages
+                    .remove(SelectedPackage::ref_cast(to_unload))
+                    .is_some(),
                 "Did not find package to remove"
             );
         }
@@ -1047,7 +1080,11 @@ impl PackageContext {
                 ctx.as_context_mut(),
                 step,
                 &transition.image.0.linker_packages.1,
-            ).map_err(|error| PackageInstantiationError { id: step.id().clone(), error })?;
+            )
+            .map_err(|error| PackageInstantiationError {
+                id: step.id().clone(),
+                error,
+            })?;
         }
 
         Ok(PackageContextTransition {

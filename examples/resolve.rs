@@ -84,7 +84,9 @@ pub fn main() {
                                 && u.id()
                                     .version()
                                     .zip(id.version())
-                                    .map(|(a, b)| a <= b && a.major == b.major && a.minor == b.minor)
+                                    .map(|(a, b)| {
+                                        a <= b && a.major == b.major && a.minor == b.minor
+                                    })
                                     .unwrap_or(id.version().is_none())
                         })
                         .unwrap();
