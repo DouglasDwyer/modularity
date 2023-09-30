@@ -42,6 +42,7 @@ pub fn main() {
     while let Some(r) = take(&mut resolver) {
         match r.resolve() {
             Ok(x) => {
+                println!("The image was {x:?}");
                 let mut ctx = PackageContext::new();
                 let transition = PackageContextTransitionBuilder::new(&x, &ctx)
                     .build(&mut store)
@@ -50,7 +51,7 @@ pub fn main() {
                     transition.apply(&mut store, &mut ctx).is_empty(),
                     "Errors occurred during transition."
                 );
-                println!("The context was {:?}", ctx);
+                println!("The context was {ctx:?}");
 
                 let pkg = ctx.package(&"test:guest4".try_into().unwrap()).unwrap();
                 let select_nth = pkg
@@ -83,10 +84,11 @@ pub fn main() {
                                 && u.id()
                                     .version()
                                     .zip(id.version())
-                                    .map(|(a, b)| a <= b)
-                                    .unwrap_or(true)
+                                    .map(|(a, b)| a <= b && a.major == b.major && a.minor == b.minor)
+                                    .unwrap_or(id.version().is_none())
                         })
                         .unwrap();
+
                     u.resolve(id.clone(), component.clone());
                 }
             }
