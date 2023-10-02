@@ -217,7 +217,7 @@ impl UnresolvedPackage {
     pub fn resolve(&mut self, id: PackageIdentifier, component: Component) {
         assert!(
             self.id.name() == id.name(),
-            "Package names were not the same."
+            "Package names were not the same. (wanted {}, got {})", self.id.name(), id.name()
         );
 
         assert!(
